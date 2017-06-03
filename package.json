@@ -1,0 +1,15 @@
+{
+    "name": "node-api-extension-installer",
+    "version": "0.1.0",
+    "description": "Node API providing a Roon extension installer via wrapped npm commands",
+    "main": "lib.js",
+    "author": "The Appgineer",
+    "license": "Apache-2.0",
+    "dependencies": {
+        "node-api-extension-runner": "https://github.com/TheAppgineer/node-api-extension-runner.git"
+    },
+    "repository": {
+        "type": "git",
+        "url": "https://github.com/TheAppgineer/node-api-extension-installer.git"
+    }
+}
