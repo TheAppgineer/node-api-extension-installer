@@ -330,8 +330,15 @@ function _query_updates(cb, name = '') {
 
     let exec_file = require('child_process').execFile;
     exec_file('npm', args, (err, stdout, stderr) => {
-        if (err) {
+        /* In npm 4.x the 'outdated' command has an exit code of 1 in case of outdated packages
+         * still the output is in stdout (stderr is empty), hence the check for stderr instead of err.
+         * Although old behavior (exit code of 0) may be selectable in future npm releases:
+         * https://github.com/npm/npm/pull/16703
+         * for compatibility it seems best to keep the stderr check.
+         */
+        if (stderr) {
             _set_status("Updates query failed", true);
+            console.log(stderr);
         } else {
             let lines = stdout.split('\n');
             let updates = {};
