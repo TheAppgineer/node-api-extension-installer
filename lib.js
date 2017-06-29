@@ -17,25 +17,14 @@
 // Default repository entries
 const MANAGER_GIT = "https://github.com/TheAppgineer/roon-extension-manager.git";
 const MANAGER_NAME = "roon-extension-manager";
-const MANAGER_INDEX = 0;
 
 const REPOS_GIT = "https://github.com/TheAppgineer/roon-extension-repository.git";
 const REPOS_NAME = 'roon-extension-repository';
-const REPOS_INDEX = 1;
 
 // Start index of community extensions
 const COMMUNITY_INDEX = 2;
 
-var ApiExtensionRunner = require('node-api-extension-runner');
-var runner = new ApiExtensionRunner();
-
-var extension_root;
-var installed = {};
-var update_list = {};
-var installer_cb;
-var status_cb;
-
-var repos = [{
+const repos_base = [{
     repository: {
         type: "git",
         url: MANAGER_GIT
@@ -48,21 +37,47 @@ var repos = [{
     }
 }];
 
-function ApiExtensionInstaller(on_installed_cb, on_status_changed_cb) {
-    installer_cb = on_installed_cb;
-    status_cb = on_status_changed_cb;
+const ACTION_INSTALL = 1;
+const ACTION_UPDATE = 2;
+const ACTION_UNINSTALL = 3;
+const ACTION_START = 4;
+const ACTION_STOP = 5;
+
+var ApiExtensionRunner = require('node-api-extension-runner');
+var runner = new ApiExtensionRunner();
+
+var extension_root;
+var repos = [];
+var installed = {};
+var updates_list = {};
+var action_queue = {};
+
+var repository_cb;
+var installs_cb;
+var updates_cb;
+var status_cb;
+
+function ApiExtensionInstaller(callbacks) {
+    if (callbacks.repository_changed) {
+        repository_cb = callbacks.repository_changed;
+    }
+    if (callbacks.installs_changed) {
+        installs_cb = callbacks.installs_changed;
+    }
+    if (callbacks.updates_changed) {
+        updates_cb = callbacks.updates_changed;
+    }
+    if (callbacks.status_changed) {
+        status_cb = callbacks.status_changed;
+    }
 
     if (_check_prerequisites()) {
         _query_installs((installed) => {
             if (!installed[REPOS_NAME]) {
                 // Install extension repository
-                _install(REPOS_INDEX, _load_repository);
+                _queue_action(REPOS_NAME, { action: ACTION_INSTALL, url: REPOS_GIT });
             } else {
                 _load_repository();
-            }
-
-            if (installer_cb) {
-                installer_cb(installed);
             }
         });
 
@@ -70,71 +85,34 @@ function ApiExtensionInstaller(on_installed_cb, on_status_changed_cb) {
     }
 }
 
-ApiExtensionInstaller.prototype.get_extension_list = function() {
-    let values = [];
-
-    // Collect extension names
-    for (let i = COMMUNITY_INDEX; i < repos.length; i++) {
-        values.push({
-            title: repos[i].display_name,
-            value: i
-        });
-    }
-
-    return values;
-}
-
 ApiExtensionInstaller.prototype.install = function(repos_index) {
-    _install(repos_index, _register_installed_version);
+    const url = repos[repos_index].repository.url;
+
+    _queue_action(_get_name_from_url(url), { action: ACTION_INSTALL, url: url });
 }
 
 ApiExtensionInstaller.prototype.uninstall = function(repos_index) {
-    const name = _get_name(repos_index);
-
-    if (name) {
-        _set_status("Uninstalling: " + name + "...", false);
-
-        if (runner.get_status(name) == 'running') {
-            runner.stop(name);
-        }
-
-        let exec_file = require('child_process').execFile;
-        exec_file('npm', ['uninstall', '-g', name], (err, stdout, stderr) => {
-            delete installed[name];
-            delete update_list[name];
-            _set_status("Uninstalled: " + name, false);
-
-            if (installer_cb) {
-                installer_cb(installed);
-            }
-        });
-    }
+    _queue_action(_get_name(repos_index), { action: ACTION_UNINSTALL });
 }
 
 ApiExtensionInstaller.prototype.update = function(repos_index) {
-    _query_updates(_update_first, _get_name(repos_index));
+    _query_updates(_queue_updates, _get_name(repos_index));
 }
 
 ApiExtensionInstaller.prototype.update_all = function() {
-    _query_updates(_update_first);
+    _query_updates(_queue_updates);
 }
 
 ApiExtensionInstaller.prototype.has_update = function(repos_index) {
-    return update_list[_get_name(repos_index)];
+    return updates_list[_get_name(repos_index)];
 }
 
 ApiExtensionInstaller.prototype.start = function(repos_index) {
-    let name = _get_name(repos_index);
-
-    runner.start(name, extension_root);
-    _set_status("Started: " + name, false);
+    _start(_get_name(repos_index));
 }
 
 ApiExtensionInstaller.prototype.stop = function(repos_index) {
-    let name = _get_name(repos_index);
-
-    runner.stop(name);
-    _set_status("Stopped: " + name, false);
+    _stop(_get_name(repos_index));
 }
 
 /**
@@ -188,7 +166,21 @@ function _load_repository() {
         if (err) {
             _set_status("Extension Repository not found", true);
         } else {
-            repos = repos.concat(JSON.parse(data));
+            let values = [];
+
+            repos = repos_base.concat(JSON.parse(data));
+
+            // Collect extension names
+            for (let i = COMMUNITY_INDEX; i < repos.length; i++) {
+                values.push({
+                    title: repos[i].display_name,
+                    value: i
+                });
+            }
+
+            if (repository_cb) {
+                repository_cb(values);
+            }
 
             _set_status("Extension Repository loaded", false);
         }
@@ -196,7 +188,11 @@ function _load_repository() {
 }
 
 function _get_name(repos_index) {
-    let substrings = repos[repos_index].repository.url.split(':');
+    return _get_name_from_url(repos[repos_index].repository.url);
+}
+
+function _get_name_from_url(url) {
+    let substrings = url.split(':');
 
     if ((substrings[0]) == 'https') {
         substrings = substrings[1].split('.')
@@ -209,9 +205,8 @@ function _get_name(repos_index) {
     return null;
 }
 
-function _install(repos_index, cb) {
-    const git = repos[repos_index].repository.url;
-    const name = _get_name(repos_index);
+function _install(git, cb) {
+    const name = _get_name_from_url(git);
 
     if (name) {
         _set_status("Installing: " + name + "...", false);
@@ -228,20 +223,22 @@ function _install(repos_index, cb) {
     }
 }
 
-function _register_installed_version(name) {
+function _register_version(name) {
     _query_installs((installed) => {
         let version = installed[name];
         _set_status("Installed: " + name + " (" + version + ")", false);
 
-        if (installer_cb) {
-            installer_cb(installed);
-        }
-        if (name != REPOS_NAME) {
+        if (name == REPOS_NAME) {
+            _load_repository();
+        } else {
+            // TODO: Only auto start on first install, not on update
             runner.start(name, extension_root);
         }
+
+        _remove_action(name);
     }, name);   // Query installed extension to obtain version number
 
-    _query_updates();
+    _query_updates(null, name);
 }
 
 function _update(name, cb) {
@@ -264,27 +261,85 @@ function _update(name, cb) {
     }
 }
 
-function _update_first(updates) {
-    if (update_list) {
-        let name = Object.keys(update_list)[0];
+function _uninstall(name, cb) {
+    if (name) {
+        _set_status("Uninstalling: " + name + "...", false);
 
-        _update(name, _update_next);
-        delete update_list[name];
+        if (runner.get_status(name) == 'running') {
+            runner.stop(name);
+        }
+
+        let exec_file = require('child_process').execFile;
+        exec_file('npm', ['uninstall', '-g', name], (err, stdout, stderr) => {
+            // Internal callback
+            if (cb) {
+                cb(name);
+            }
+            // User callback
+            if (installs_cb) {
+                installs_cb(installed);
+            }
+        });
     }
 }
 
-function _update_next(name) {
-    _register_installed_version(name);
+function _unregister_version(name) {
+    delete installed[name];
+    delete updates_list[name];
 
-    if (update_list) {
-        let name = Object.keys(update_list)[0];
+    _set_status("Uninstalled: " + name, false);
+    _remove_action(name);
+}
 
-        _update(name, _update_next);
-        delete update_list[name];
+function _start(name) {
+    runner.start(name, extension_root);
+    _set_status("Started: " + name, false);
+}
+
+function _stop(name) {
+    runner.stop(name);
+    _set_status("Stopped: " + name, false);
+}
+
+function _queue_action(name, action_props) {
+    action_queue[name] = action_props;
+
+    if (Object.keys(action_queue).length == 1) {
+        _perform_action();
     }
 }
 
-function _query_installs(cb, name = '') {
+function _remove_action(name) {
+    delete action_queue[name];
+
+    _perform_action();      // Anything pending?
+}
+
+function _perform_action() {
+    if (Object.keys(action_queue).length) {
+        let name = Object.keys(action_queue)[0];
+
+        switch (action_queue[name].action) {
+            case ACTION_INSTALL:
+                _install(action_queue[name].url, _register_version);
+                break;
+            case ACTION_UPDATE:
+                _update(name, _register_version);
+                break;
+            case ACTION_UNINSTALL:
+                _uninstall(name, _unregister_version);
+                break;
+        }
+    }
+}
+
+function _queue_updates(updates) {
+    for (let name in updates) {
+        _queue_action(name, { action: ACTION_UPDATE });
+    }
+}
+
+function _query_installs(cb, name) {
     let args = ['list', '-g'];
 
     if (name) {
@@ -301,7 +356,7 @@ function _query_installs(cb, name = '') {
             let lines = stdout.split('\n');
             extension_root = lines[0] + '/node_modules/';
 
-            if (name == '') {
+            if (!name) {
                 installed = {};
             }
 
@@ -313,14 +368,19 @@ function _query_installs(cb, name = '') {
                 }
             }
 
+            // Internal callback
             if (cb) {
                 cb(installed);
+            }
+            // User callback
+            if (installs_cb) {
+                installs_cb(installed);
             }
         }
     });
 }
 
-function _query_updates(cb, name = '') {
+function _query_updates(cb, name) {
     let args = ['outdated', '-g'];
 
     if (name) {
@@ -340,16 +400,24 @@ function _query_updates(cb, name = '') {
             _set_status("Updates query failed", true);
             console.log(stderr);
         } else {
-            let lines = stdout.split('\n');
+            const lines = stdout.split('\n');
             let updates = {};
 
             for (let i = 1; i < lines.length && lines[i]; i++) {
-                let fields = lines[i].split(/[ ]+/);    // Split by space(s)
-                updates[fields[0]] = fields[2];         // [name] = wanted
+                const fields = lines[i].split(/[ ]+/);    // Split by space(s)
+                const update_name = fields[0];
+                const update_wanted = fields[2];
+
+                updates[update_name] = update_wanted;
+                updates_list[update_name] = update_wanted;
             }
 
-            update_list = updates;
-
+            // User callback
+            if (updates_cb) {
+                // Supply full update list
+                updates_cb(updates_list);
+            }
+            // Internal callback
             if (cb) {
                 cb(updates);
             }
