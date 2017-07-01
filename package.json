@@ -6,7 +6,8 @@
     "author": "The Appgineer",
     "license": "Apache-2.0",
     "dependencies": {
-        "node-api-extension-runner": "github:TheAppgineer/node-api-extension-runner"
+        "mkdirp": "^0.5.0",
+        "node-api-extension-runner": "github:TheAppgineer/node-api-extension-runner#dev"
     },
     "repository": {
         "type": "git",

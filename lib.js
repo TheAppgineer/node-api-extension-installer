@@ -43,6 +43,10 @@ const ACTION_UNINSTALL = 3;
 const ACTION_START = 4;
 const ACTION_STOP = 5;
 
+const config_dir = 'etc/'
+const module_dir = 'lib/node_modules/'
+
+var mkdirp = require('mkdirp');
 var ApiExtensionRunner = require('node-api-extension-runner');
 var runner = new ApiExtensionRunner();
 
@@ -58,17 +62,19 @@ var updates_cb;
 var status_cb;
 
 function ApiExtensionInstaller(callbacks) {
-    if (callbacks.repository_changed) {
-        repository_cb = callbacks.repository_changed;
-    }
-    if (callbacks.installs_changed) {
-        installs_cb = callbacks.installs_changed;
-    }
-    if (callbacks.updates_changed) {
-        updates_cb = callbacks.updates_changed;
-    }
-    if (callbacks.status_changed) {
-        status_cb = callbacks.status_changed;
+    if (callbacks) {
+        if (callbacks.repository_changed) {
+            repository_cb = callbacks.repository_changed;
+        }
+        if (callbacks.installs_changed) {
+            installs_cb = callbacks.installs_changed;
+        }
+        if (callbacks.updates_changed) {
+            updates_cb = callbacks.updates_changed;
+        }
+        if (callbacks.status_changed) {
+            status_cb = callbacks.status_changed;
+        }
     }
 
     if (_check_prerequisites()) {
@@ -160,7 +166,7 @@ function _check_prerequisites() {
 
 function _load_repository() {
     let fs = require('fs');
-    let repos_path = extension_root + REPOS_NAME + '/repository.json'
+    let repos_path = extension_root + module_dir + REPOS_NAME + '/repository.json'
 
     fs.readFile(repos_path, 'utf8', function(err, data) {
         if (err) {
@@ -178,11 +184,11 @@ function _load_repository() {
                 });
             }
 
+            _set_status("Extension Repository loaded", false);
+
             if (repository_cb) {
                 repository_cb(values);
             }
-
-            _set_status("Extension Repository loaded", false);
         }
     });
 }
@@ -232,7 +238,7 @@ function _register_version(name) {
             _load_repository();
         } else {
             // TODO: Only auto start on first install, not on update
-            runner.start(name, extension_root);
+            _start(name);
         }
 
         _remove_action(name);
@@ -244,10 +250,7 @@ function _register_version(name) {
 function _update(name, cb) {
     if (name) {
         _set_status("Updating: " + name + "...", false);
-
-        if (name != REPOS_NAME) {
-            runner.stop(name);
-        }
+        _stop(name);
 
         let exec_file = require('child_process').execFile;
         exec_file('npm', ['update', '-g', name], (err, stdout, stderr) => {
@@ -264,10 +267,7 @@ function _update(name, cb) {
 function _uninstall(name, cb) {
     if (name) {
         _set_status("Uninstalling: " + name + "...", false);
-
-        if (runner.get_status(name) == 'running') {
-            runner.stop(name);
-        }
+        _stop(name);
 
         let exec_file = require('child_process').execFile;
         exec_file('npm', ['uninstall', '-g', name], (err, stdout, stderr) => {
@@ -292,13 +292,29 @@ function _unregister_version(name) {
 }
 
 function _start(name) {
-    runner.start(name, extension_root);
-    _set_status("Started: " + name, false);
+    const config_path = extension_root + config_dir + name;
+    const module_path = extension_root + module_dir + name;
+
+    mkdirp(config_path, (err, made) => {
+        if (err) {
+            _set_status("Failed to create directory: " + config_path, true);
+        } else {
+            runner.start(name, config_path, module_path);
+
+            if (name == MANAGER_NAME) {
+                process.exit();     // Let new instance take over
+            } else {
+                _set_status("Started: " + name, false);
+            }
+        }
+    });
 }
 
 function _stop(name) {
-    runner.stop(name);
-    _set_status("Stopped: " + name, false);
+    if (name != MANAGER_NAME && name != REPOS_NAME) {
+        runner.stop(name);
+        _set_status("Stopped: " + name, false);
+    }
 }
 
 function _queue_action(name, action_props) {
@@ -316,15 +332,28 @@ function _remove_action(name) {
 }
 
 function _perform_action() {
-    if (Object.keys(action_queue).length) {
-        let name = Object.keys(action_queue)[0];
+    const length = Object.keys(action_queue).length;
+
+    if (length) {
+        let name;
+        let index = 0;
+
+        // Perform manager actions last
+        do {
+            name = Object.keys(action_queue)[index];
+            index++;
+        } while (name == MANAGER_NAME && index < length)
 
         switch (action_queue[name].action) {
             case ACTION_INSTALL:
                 _install(action_queue[name].url, _register_version);
                 break;
             case ACTION_UPDATE:
-                _update(name, _register_version);
+                if (name == MANAGER_NAME) {
+                    _update(name, _start);
+                } else {
+                    _update(name, _register_version);
+                }
                 break;
             case ACTION_UNINSTALL:
                 _uninstall(name, _unregister_version);
@@ -354,7 +383,7 @@ function _query_installs(cb, name) {
             console.log(stderr);
         } else {
             let lines = stdout.split('\n');
-            extension_root = lines[0] + '/node_modules/';
+            extension_root = lines[0].split('lib')[0];
 
             if (!name) {
                 installed = {};
