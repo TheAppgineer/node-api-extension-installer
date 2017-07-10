@@ -55,13 +55,15 @@ var repos = [];
 var installed = {};
 var updates_list = {};
 var action_queue = {};
+var stdio_inherit_mode;
+var self_update_pending = false;
 
 var repository_cb;
 var installs_cb;
 var updates_cb;
 var status_cb;
 
-function ApiExtensionInstaller(callbacks) {
+function ApiExtensionInstaller(callbacks, inherit_mode) {
     if (callbacks) {
         if (callbacks.repository_changed) {
             repository_cb = callbacks.repository_changed;
@@ -75,6 +77,12 @@ function ApiExtensionInstaller(callbacks) {
         if (callbacks.status_changed) {
             status_cb = callbacks.status_changed;
         }
+    }
+
+    if (inherit_mode) {
+        stdio_inherit_mode = inherit_mode;
+    } else {
+        stdio_inherit_mode = 'ignore';
     }
 
     if (_check_prerequisites()) {
@@ -236,7 +244,7 @@ function _register_version(name) {
 
         if (name == REPOS_NAME) {
             _load_repository();
-        } else {
+        } else if (!self_update_pending) {
             // TODO: Only auto start on first install, not on update
             _start(name);
         }
@@ -299,7 +307,21 @@ function _start(name) {
         if (err) {
             _set_status("Failed to create directory: " + config_path, true);
         } else {
-            runner.start(name, config_path, module_path);
+            let inherit_mode = 'ignore';
+
+            if (name == MANAGER_NAME) {
+                // Pass the inherit mode to the new instance
+                inherit_mode = stdio_inherit_mode;
+            } else if (stdio_inherit_mode == 'inherit_all') {
+                // Let the child inherit stdio streams
+                inherit_mode = 'inherit';
+            }
+
+            runner.start(name, config_path, module_path, inherit_mode, (code) => {
+                if (code) {
+                    _set_status(name + " terminated unexpectedly", true);
+                }
+            });
 
             if (name == MANAGER_NAME) {
                 process.exit();     // Let new instance take over
@@ -311,7 +333,9 @@ function _start(name) {
 }
 
 function _stop(name) {
-    if (name != MANAGER_NAME && name != REPOS_NAME) {
+    let running = (runner.get_status(name) == 'running');
+
+    if (name != MANAGER_NAME && name != REPOS_NAME && running) {
         runner.stop(name);
         _set_status("Stopped: " + name, false);
     }
@@ -364,6 +388,9 @@ function _perform_action() {
 
 function _queue_updates(updates) {
     for (let name in updates) {
+        if (name == MANAGER_NAME) {
+            self_update_pending = true;     // Prevent extension restarts
+        }
         _queue_action(name, { action: ACTION_UPDATE });
     }
 }
