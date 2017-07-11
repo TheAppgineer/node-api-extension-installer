@@ -48,8 +48,8 @@ const module_dir = 'lib/node_modules/'
 
 var mkdirp = require('mkdirp');
 var ApiExtensionRunner = require('node-api-extension-runner');
-var runner = new ApiExtensionRunner();
 
+var runner;
 var extension_root;
 var repos = [];
 var installed = {};
@@ -93,6 +93,12 @@ function ApiExtensionInstaller(callbacks, inherit_mode) {
             } else {
                 _load_repository();
             }
+
+            runner = new ApiExtensionRunner((running) => {
+                for (let i = 0; i < running.length; i++) {
+                    _start(running[i]);
+                }
+            });
         });
 
         _query_updates();
@@ -126,7 +132,7 @@ ApiExtensionInstaller.prototype.start = function(repos_index) {
 }
 
 ApiExtensionInstaller.prototype.stop = function(repos_index) {
-    _stop(_get_name(repos_index));
+    _stop(_get_name(repos_index), true);
 }
 
 /**
@@ -237,15 +243,26 @@ function _install(git, cb) {
     }
 }
 
-function _register_version(name) {
+function _register_installed_version(name) {
+    _register_version(name, false);
+}
+
+function _register_updated_version(name) {
+    _register_version(name, true);
+}
+
+function _register_version(name, update) {
     _query_installs((installed) => {
-        let version = installed[name];
-        _set_status("Installed: " + name + " (" + version + ")", false);
+        const version = installed[name];
+        _set_status((update ? "Updated: " : "Installed: ") + name + " (" + version + ")", false);
 
         if (name == REPOS_NAME) {
             _load_repository();
-        } else if (!self_update_pending) {
-            // TODO: Only auto start on first install, not on update
+        } else if (update) {
+            if (!self_update_pending && runner.get_status(name) != 'stopped') {
+                _start(name);
+            }
+        } else {
             _start(name);
         }
 
@@ -258,16 +275,16 @@ function _register_version(name) {
 function _update(name, cb) {
     if (name) {
         _set_status("Updating: " + name + "...", false);
-        _stop(name);
-
-        let exec_file = require('child_process').execFile;
-        exec_file('npm', ['update', '-g', name], (err, stdout, stderr) => {
-            if (err) {
-                _set_status("Update failed: " + name, true);
-                console.log(stderr);
-            } else if (cb) {
-                cb(name);
-            }
+        _stop(name, false, () => {
+            let exec_file = require('child_process').execFile;
+            exec_file('npm', ['update', '-g', name], (err, stdout, stderr) => {
+                if (err) {
+                    _set_status("Update failed: " + name, true);
+                    console.log(stderr);
+                } else if (cb) {
+                    cb(name);
+                }
+            });
         });
     }
 }
@@ -275,7 +292,7 @@ function _update(name, cb) {
 function _uninstall(name, cb) {
     if (name) {
         _set_status("Uninstalling: " + name + "...", false);
-        _stop(name);
+        _stop(name, true);
 
         let exec_file = require('child_process').execFile;
         exec_file('npm', ['uninstall', '-g', name], (err, stdout, stderr) => {
@@ -332,12 +349,24 @@ function _start(name) {
     });
 }
 
-function _stop(name) {
-    let running = (runner.get_status(name) == 'running');
+function _stop(name, user, cb) {
+    const running = (runner.get_status(name) == 'running');
 
-    if (name != MANAGER_NAME && name != REPOS_NAME && running) {
-        runner.stop(name);
-        _set_status("Stopped: " + name, false);
+    if (name == MANAGER_NAME) {
+        runner.prepare_exit(cb);
+    } else {
+        if (name != REPOS_NAME && running) {
+            if (user) {
+                runner.stop(name);
+                _set_status("Stopped: " + name, false);
+            } else {
+                runner.terminate(name);
+            }
+        }
+
+        if (cb) {
+            cb();
+        }
     }
 }
 
@@ -370,13 +399,13 @@ function _perform_action() {
 
         switch (action_queue[name].action) {
             case ACTION_INSTALL:
-                _install(action_queue[name].url, _register_version);
+                _install(action_queue[name].url, _register_installed_version);
                 break;
             case ACTION_UPDATE:
                 if (name == MANAGER_NAME) {
                     _update(name, _start);
                 } else {
-                    _update(name, _register_version);
+                    _update(name, _register_updated_version);
                 }
                 break;
             case ACTION_UNINSTALL:
