@@ -135,6 +135,12 @@ ApiExtensionInstaller.prototype.stop = function(repos_index) {
     _stop(_get_name(repos_index), true);
 }
 
+ApiExtensionInstaller.prototype.restart_manager = function() {
+    _stop(MANAGER_NAME, false, () => {
+        _start(MANAGER_NAME);
+    });
+}
+
 /**
  * Returns the status of an extension identified by name
  *
@@ -350,11 +356,11 @@ function _start(name) {
 }
 
 function _stop(name, user, cb) {
-    const running = (runner.get_status(name) == 'running');
-
     if (name == MANAGER_NAME) {
         runner.prepare_exit(cb);
     } else {
+        const running = (runner.get_status(name) == 'running');
+
         if (name != REPOS_NAME && running) {
             if (user) {
                 runner.stop(name);
