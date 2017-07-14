@@ -325,11 +325,10 @@ function _backup(options, cb) {
     const tar = require('tar');
 
     fs.readFile(options.cwd + '.npmignore', 'utf8', function(err, data) {
-        if (err) {
-            console.log(err);
-        } else {
+        let globs = [];
+
+        if (!err) {
             const lines = data.split('\n');
-            let globs = [];
 
             for (let i = 0; i < lines.length; i++) {
                 let line = lines[i].trim();
@@ -340,12 +339,12 @@ function _backup(options, cb) {
                     }
                 }
             }
+        }
 
-            if (globs.length) {
-                tar.create(options, globs, cb);
-            } else if (cb) {
-                cb(true);
-            }
+        if (globs.length) {
+            tar.create(options, globs, cb);
+        } else if (cb) {
+            cb(true);
         }
     });
 }
