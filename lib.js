@@ -43,10 +43,9 @@ const ACTION_UNINSTALL = 3;
 const ACTION_START = 4;
 const ACTION_STOP = 5;
 
-const config_dir = 'etc/'
+const backup_dir = 'backup/'
 const module_dir = 'lib/node_modules/'
 
-var mkdirp = require('mkdirp');
 var ApiExtensionRunner = require('node-api-extension-runner');
 
 var runner;
@@ -87,6 +86,15 @@ function ApiExtensionInstaller(callbacks, inherit_mode) {
 
     if (_check_prerequisites()) {
         _query_installs((installed) => {
+            const mkdirp = require('mkdirp');
+
+            // Create backup directory, used during update
+            mkdirp(extension_root + backup_dir, (err, made) => {
+                if (err) {
+                    console.log(err);
+                }
+            });
+
             if (!installed[REPOS_NAME]) {
                 // Install extension repository
                 _queue_action(REPOS_NAME, { action: ACTION_INSTALL, url: REPOS_GIT });
@@ -185,7 +193,7 @@ function _check_prerequisites() {
 }
 
 function _load_repository() {
-    let fs = require('fs');
+    const fs = require('fs');
     let repos_path = extension_root + module_dir + REPOS_NAME + '/repository.json'
 
     fs.readFile(repos_path, 'utf8', function(err, data) {
@@ -281,18 +289,65 @@ function _register_version(name, update) {
 function _update(name, cb) {
     if (name) {
         _set_status("Updating: " + name + "...", false);
+
         _stop(name, false, () => {
-            let exec_file = require('child_process').execFile;
-            exec_file('npm', ['update', '-g', name], (err, stdout, stderr) => {
-                if (err) {
-                    _set_status("Update failed: " + name, true);
-                    console.log(stderr);
-                } else if (cb) {
-                    cb(name);
-                }
+            const cwd = extension_root + module_dir + name + '/';
+            const backup_file = extension_root + backup_dir + name + '.tar';
+            const options = { file: backup_file, cwd: cwd };
+
+            _backup(options, (clean) => {
+                let exec_file = require('child_process').execFile;
+
+                exec_file('npm', ['update', '-g', name], (err, stdout, stderr) => {
+                    if (err) {
+                        _set_status("Update failed: " + name, true);
+                        console.log(stderr);
+                    } else if (clean) {
+                        if (cb) {
+                            cb(name);
+                        }
+                    } else {
+                        const tar = require('tar');
+                        tar.extract(options, [], () => {
+                            if (cb) {
+                                cb(name);
+                            }
+                        });
+                    }
+                });
             });
         });
     }
+}
+
+function _backup(options, cb) {
+    const fs = require('fs');
+    const tar = require('tar');
+
+    fs.readFile(options.cwd + '.npmignore', 'utf8', function(err, data) {
+        if (err) {
+            console.log(err);
+        } else {
+            const lines = data.split('\n');
+            let globs = [];
+
+            for (let i = 0; i < lines.length; i++) {
+                let line = lines[i].trim();
+
+                if (line && line != 'node_modules' && line[0] != '#') {
+                    if (fs.existsSync(options.cwd + line)) {
+                        globs.push(line);
+                    }
+                }
+            }
+
+            if (globs.length) {
+                tar.create(options, globs, cb);
+            } else if (cb) {
+                cb(true);
+            }
+        }
+    });
 }
 
 function _uninstall(name, cb) {
@@ -323,36 +378,28 @@ function _unregister_version(name) {
 }
 
 function _start(name) {
-    const config_path = extension_root + config_dir + name;
-    const module_path = extension_root + module_dir + name;
+    const cwd = extension_root + module_dir + name;
+    let inherit_mode = 'ignore';
 
-    mkdirp(config_path, (err, made) => {
-        if (err) {
-            _set_status("Failed to create directory: " + config_path, true);
-        } else {
-            let inherit_mode = 'ignore';
+    if (name == MANAGER_NAME) {
+        // Pass the inherit mode to the new instance
+        inherit_mode = stdio_inherit_mode;
+    } else if (stdio_inherit_mode == 'inherit_all') {
+        // Let the child inherit stdio streams
+        inherit_mode = 'inherit';
+    }
 
-            if (name == MANAGER_NAME) {
-                // Pass the inherit mode to the new instance
-                inherit_mode = stdio_inherit_mode;
-            } else if (stdio_inherit_mode == 'inherit_all') {
-                // Let the child inherit stdio streams
-                inherit_mode = 'inherit';
-            }
-
-            runner.start(name, config_path, module_path, inherit_mode, (code) => {
-                if (code) {
-                    _set_status(name + " terminated unexpectedly", true);
-                }
-            });
-
-            if (name == MANAGER_NAME) {
-                process.exit();     // Let new instance take over
-            } else {
-                _set_status("Started: " + name, false);
-            }
+    runner.start(name, cwd, '.', inherit_mode, (code) => {
+        if (code) {
+            _set_status(name + " terminated unexpectedly", true);
         }
     });
+
+    if (name == MANAGER_NAME) {
+        process.exit();     // Let new instance take over
+    } else {
+        _set_status("Started: " + name, false);
+    }
 }
 
 function _stop(name, user, cb) {
@@ -444,7 +491,7 @@ function _query_installs(cb, name) {
             _set_status("Extension query failed", true);
             console.log(stderr);
         } else {
-            let lines = stdout.split('\n');
+            const lines = stdout.split('\n');
             extension_root = lines[0].split('lib')[0];
 
             if (!name) {
