@@ -44,7 +44,7 @@ const ACTION_START = 4;
 const ACTION_STOP = 5;
 
 const backup_dir = 'backup/'
-const module_dir = 'lib/node_modules/'
+const module_dir = 'node_modules/'
 
 var ApiExtensionRunner = require('node-api-extension-runner');
 
@@ -245,8 +245,8 @@ function _install(git, cb) {
     if (name) {
         _set_status("Installing: " + name + "...", false);
 
-        let exec_file = require('child_process').execFile;
-        exec_file('npm', ['install', '-g', git], (err, stdout, stderr) => {
+        let exec = require('child_process').exec;
+        exec('npm install -g ' + git, (err, stdout, stderr) => {
             if (err) {
                 _set_status("Installation failed: " + name, true);
                 console.log(stderr);
@@ -296,9 +296,8 @@ function _update(name, cb) {
             const options = { file: backup_file, cwd: cwd };
 
             _backup(options, (clean) => {
-                let exec_file = require('child_process').execFile;
-
-                exec_file('npm', ['update', '-g', name], (err, stdout, stderr) => {
+                let exec = require('child_process').exec;
+                exec('npm update -g ' + name, (err, stdout, stderr) => {
                     if (err) {
                         _set_status("Update failed: " + name, true);
                         console.log(stderr);
@@ -354,8 +353,8 @@ function _uninstall(name, cb) {
         _set_status("Uninstalling: " + name + "...", false);
         _stop(name, true);
 
-        let exec_file = require('child_process').execFile;
-        exec_file('npm', ['uninstall', '-g', name], (err, stdout, stderr) => {
+        let exec = require('child_process').exec;
+        exec('npm uninstall -g ' + name, (err, stdout, stderr) => {
             // Internal callback
             if (cb) {
                 cb(name);
@@ -477,21 +476,22 @@ function _queue_updates(updates) {
 }
 
 function _query_installs(cb, name) {
-    let args = ['list', '-g'];
+    let args = ' list -g';
 
     if (name) {
-        args.push(name);
+        args += ' ' + name;
     }
-    args.push('--depth=0');
+    args += ' --depth=0';
 
-    let exec_file = require('child_process').execFile;
-    exec_file('npm', args, (err, stdout, stderr) => {
+    let exec = require('child_process').exec;
+    exec('npm' + args, (err, stdout, stderr) => {
         if (err) {
             _set_status("Extension query failed", true);
-            console.log(stderr);
+            console.error(stderr);
+            throw err;
         } else {
             const lines = stdout.split('\n');
-            extension_root = lines[0].split('lib')[0];
+            extension_root = lines[0] + '/';
 
             if (!name) {
                 installed = {};
@@ -518,15 +518,15 @@ function _query_installs(cb, name) {
 }
 
 function _query_updates(cb, name) {
-    let args = ['outdated', '-g'];
+    let args = ' outdated -g';
 
     if (name) {
-        args.push(name);
+        args += ' ' + name;
     }
-    args.push('--depth=0');
+    args += ' --depth=0';
 
-    let exec_file = require('child_process').execFile;
-    exec_file('npm', args, (err, stdout, stderr) => {
+    let exec = require('child_process').exec;
+    exec('npm' + args, (err, stdout, stderr) => {
         /* In npm 4.x the 'outdated' command has an exit code of 1 in case of outdated packages
          * still the output is in stdout (stderr is empty), hence the check for stderr instead of err.
          * Although old behavior (exit code of 0) may be selectable in future npm releases:
@@ -535,7 +535,8 @@ function _query_updates(cb, name) {
          */
         if (stderr) {
             _set_status("Updates query failed", true);
-            console.log(stderr);
+            console.error(stderr);
+            throw err;
         } else {
             const lines = stdout.split('\n');
             let updates = {};
