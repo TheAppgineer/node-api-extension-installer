@@ -43,8 +43,9 @@ const ACTION_UNINSTALL = 3;
 const ACTION_START = 4;
 const ACTION_STOP = 5;
 
+const module_dir = 'node_modules/'
 const backup_dir = 'backup/'
-const module_dir = 'lib/node_modules/'
+const perform_update = 66;
 
 var ApiExtensionRunner = require('node-api-extension-runner');
 
@@ -56,13 +57,14 @@ var updates_list = {};
 var action_queue = {};
 var stdio_inherit_mode;
 var self_update_pending = false;
+var self_update;
 
 var repository_cb;
 var installs_cb;
 var updates_cb;
 var status_cb;
 
-function ApiExtensionInstaller(callbacks, inherit_mode) {
+function ApiExtensionInstaller(callbacks, inherit_mode, self_control) {
     if (callbacks) {
         if (callbacks.repository_changed) {
             repository_cb = callbacks.repository_changed;
@@ -83,6 +85,8 @@ function ApiExtensionInstaller(callbacks, inherit_mode) {
     } else {
         stdio_inherit_mode = 'ignore';
     }
+
+    self_update = self_control;
 
     if (_check_prerequisites()) {
         _query_installs((installed) => {
@@ -245,11 +249,11 @@ function _install(git, cb) {
     if (name) {
         _set_status("Installing: " + name + "...", false);
 
-        let exec_file = require('child_process').execFile;
-        exec_file('npm', ['install', '-g', git], (err, stdout, stderr) => {
+        let exec = require('child_process').exec;
+        exec('npm install -g ' + git, (err, stdout, stderr) => {
             if (err) {
                 _set_status("Installation failed: " + name, true);
-                console.log(stderr);
+                console.error(stderr);
             } else if (cb) {
                 cb(name);
             }
@@ -288,35 +292,38 @@ function _register_version(name, update) {
 
 function _update(name, cb) {
     if (name) {
-        _set_status("Updating: " + name + "...", false);
+        if (self_update || name != MANAGER_NAME) {
+            _set_status("Updating: " + name + "...", false);
 
-        _stop(name, false, () => {
-            const cwd = extension_root + module_dir + name + '/';
-            const backup_file = extension_root + backup_dir + name + '.tar';
-            const options = { file: backup_file, cwd: cwd };
+            _stop(name, false, () => {
+                const cwd = extension_root + module_dir + name + '/';
+                const backup_file = extension_root + backup_dir + name + '.tar';
+                const options = { file: backup_file, cwd: cwd };
 
-            _backup(options, (clean) => {
-                let exec_file = require('child_process').execFile;
-
-                exec_file('npm', ['update', '-g', name], (err, stdout, stderr) => {
-                    if (err) {
-                        _set_status("Update failed: " + name, true);
-                        console.log(stderr);
-                    } else if (clean) {
-                        if (cb) {
-                            cb(name);
-                        }
-                    } else {
-                        const tar = require('tar');
-                        tar.extract(options, [], () => {
+                _backup(options, (clean) => {
+                    let exec = require('child_process').exec;
+                    exec('npm update -g ' + name, (err, stdout, stderr) => {
+                        if (err) {
+                            _set_status("Update failed: " + name, true);
+                            console.error(stderr);
+                        } else if (clean) {
                             if (cb) {
                                 cb(name);
                             }
-                        });
-                    }
+                        } else {
+                            const tar = require('tar');
+                            tar.extract(options, [], () => {
+                                if (cb) {
+                                    cb(name);
+                                }
+                            });
+                        }
+                    });
                 });
             });
-        });
+        } else {
+            _stop(name, false, _exit_for_update);
+        }
     }
 }
 
@@ -354,8 +361,8 @@ function _uninstall(name, cb) {
         _set_status("Uninstalling: " + name + "...", false);
         _stop(name, true);
 
-        let exec_file = require('child_process').execFile;
-        exec_file('npm', ['uninstall', '-g', name], (err, stdout, stderr) => {
+        let exec = require('child_process').exec;
+        exec('npm uninstall -g ' + name, (err, stdout, stderr) => {
             // Internal callback
             if (cb) {
                 cb(name);
@@ -422,6 +429,10 @@ function _stop(name, user, cb) {
     }
 }
 
+function _exit_for_update() {
+    process.exit(perform_update);
+}
+
 function _queue_action(name, action_props) {
     action_queue[name] = action_props;
 
@@ -440,14 +451,7 @@ function _perform_action() {
     const length = Object.keys(action_queue).length;
 
     if (length) {
-        let name;
-        let index = 0;
-
-        // Perform manager actions last
-        do {
-            name = Object.keys(action_queue)[index];
-            index++;
-        } while (name == MANAGER_NAME && index < length)
+        const name = Object.keys(action_queue)[0];
 
         switch (action_queue[name].action) {
             case ACTION_INSTALL:
@@ -468,30 +472,37 @@ function _perform_action() {
 }
 
 function _queue_updates(updates) {
-    for (let name in updates) {
+    for (const name in updates) {
         if (name == MANAGER_NAME) {
             self_update_pending = true;     // Prevent extension restarts
+        } else {
+            _queue_action(name, { action: ACTION_UPDATE });
         }
-        _queue_action(name, { action: ACTION_UPDATE });
+    }
+
+    if (self_update_pending) {
+        // Perform manager actions last
+        _queue_action(MANAGER_NAME, { action: ACTION_UPDATE });
     }
 }
 
 function _query_installs(cb, name) {
-    let args = ['list', '-g'];
+    let args = ' list -g';
 
     if (name) {
-        args.push(name);
+        args += ' ' + name;
     }
-    args.push('--depth=0');
+    args += ' --depth=0';
 
-    let exec_file = require('child_process').execFile;
-    exec_file('npm', args, (err, stdout, stderr) => {
+    let exec = require('child_process').exec;
+    exec('npm' + args, (err, stdout, stderr) => {
         if (err) {
             _set_status("Extension query failed", true);
-            console.log(stderr);
+            console.error(stderr);
+            throw err;
         } else {
             const lines = stdout.split('\n');
-            extension_root = lines[0].split('lib')[0];
+            extension_root = lines[0] + '/';
 
             if (!name) {
                 installed = {};
@@ -518,15 +529,15 @@ function _query_installs(cb, name) {
 }
 
 function _query_updates(cb, name) {
-    let args = ['outdated', '-g'];
+    let args = ' outdated -g';
 
     if (name) {
-        args.push(name);
+        args += ' ' + name;
     }
-    args.push('--depth=0');
+    args += ' --depth=0';
 
-    let exec_file = require('child_process').execFile;
-    exec_file('npm', args, (err, stdout, stderr) => {
+    let exec = require('child_process').exec;
+    exec('npm' + args, (err, stdout, stderr) => {
         /* In npm 4.x the 'outdated' command has an exit code of 1 in case of outdated packages
          * still the output is in stdout (stderr is empty), hence the check for stderr instead of err.
          * Although old behavior (exit code of 0) may be selectable in future npm releases:
@@ -535,7 +546,8 @@ function _query_updates(cb, name) {
          */
         if (stderr) {
             _set_status("Updates query failed", true);
-            console.log(stderr);
+            console.error(stderr);
+            throw err;
         } else {
             const lines = stdout.split('\n');
             let updates = {};
@@ -567,7 +579,11 @@ function _set_status(message, is_error) {
         status_cb(message, is_error);
     }
 
-    console.log(is_error ? 'Err:' : 'Inf:', message);
+    if (is_error) {
+        console.error('Err:', message);
+    } else {
+        console.log('Inf:', message);
+    }
 }
 
 exports = module.exports = ApiExtensionInstaller;
