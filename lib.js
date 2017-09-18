@@ -46,6 +46,7 @@ const ACTION_STOP = 5;
 const module_dir = 'node_modules/'
 const backup_dir = 'backup/'
 const perform_update = 66;
+const perform_restart = 67;
 
 var ApiExtensionRunner = require('node-api-extension-runner');
 
@@ -149,7 +150,11 @@ ApiExtensionInstaller.prototype.stop = function(repos_index) {
 
 ApiExtensionInstaller.prototype.restart_manager = function() {
     _stop(MANAGER_NAME, false, () => {
-        _start(MANAGER_NAME);
+        if (self_update) {
+            _start(MANAGER_NAME);
+        } else {
+            process.exit(perform_restart);
+        }
     });
 }
 
@@ -410,7 +415,11 @@ function _start(name) {
 
 function _stop(name, user, cb) {
     if (name == MANAGER_NAME) {
-        runner.prepare_exit(cb);
+        if (runner) {
+            runner.prepare_exit(cb);
+        } else if (cb) {
+            cb();
+        }
     } else {
         const running = (runner.get_status(name) == 'running');
 
@@ -499,7 +508,6 @@ function _query_installs(cb, name) {
         if (err) {
             _set_status("Extension query failed", true);
             console.error(stderr);
-            throw err;
         } else {
             const lines = stdout.split('\n');
             extension_root = lines[0] + '/';
@@ -547,7 +555,6 @@ function _query_updates(cb, name) {
         if (stderr) {
             _set_status("Updates query failed", true);
             console.error(stderr);
-            throw err;
         } else {
             const lines = stdout.split('\n');
             let updates = {};
