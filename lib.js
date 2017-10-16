@@ -144,6 +144,14 @@ ApiExtensionInstaller.prototype.start = function(repos_index) {
     _start(_get_name(repos_index));
 }
 
+ApiExtensionInstaller.prototype.restart = function(repos_index) {
+    const name = _get_name(repos_index);
+
+    runner.restart(name, () => {
+        _set_status("Restarted: " + name, false);
+    });
+}
+
 ApiExtensionInstaller.prototype.stop = function(repos_index) {
     _stop(_get_name(repos_index), true);
 }
@@ -298,14 +306,14 @@ function _register_version(name, update) {
 function _update(name, cb) {
     if (name) {
         if (self_update || name != MANAGER_NAME) {
-            _set_status("Updating: " + name + "...", false);
-
             _stop(name, false, () => {
                 const cwd = extension_root + module_dir + name + '/';
                 const backup_file = extension_root + backup_dir + name + '.tar';
                 const options = { file: backup_file, cwd: cwd };
 
                 _backup(options, (clean) => {
+                    _set_status("Updating: " + name + "...", false);
+
                     let exec = require('child_process').exec;
                     exec('npm update -g ' + name, (err, stdout, stderr) => {
                         if (err) {
@@ -364,18 +372,18 @@ function _backup(options, cb) {
 function _uninstall(name, cb) {
     if (name) {
         _set_status("Uninstalling: " + name + "...", false);
-        _stop(name, true);
-
-        let exec = require('child_process').exec;
-        exec('npm uninstall -g ' + name, (err, stdout, stderr) => {
-            // Internal callback
-            if (cb) {
-                cb(name);
-            }
-            // User callback
-            if (installs_cb) {
-                installs_cb(installed);
-            }
+        _stop(name, true, () => {
+            let exec = require('child_process').exec;
+            exec('npm uninstall -g ' + name, (err, stdout, stderr) => {
+                // Internal callback
+                if (cb) {
+                    cb(name);
+                }
+                // User callback
+                if (installs_cb) {
+                    installs_cb(installed);
+                }
+            });
         });
     }
 }
@@ -400,9 +408,13 @@ function _start(name) {
         inherit_mode = 'inherit';
     }
 
-    runner.start(name, cwd, '.', inherit_mode, (code) => {
-        if (code) {
-            _set_status(name + " terminated unexpectedly", true);
+    runner.start(name, cwd, '.', inherit_mode, (code, signal, user) => {
+        if (user) {
+            _set_status("Stopped: " + name, false);
+        } else if (code !== null) {
+            _set_status("Terminated: " + name + " (" + code +")", code);
+        } else if (signal) {
+            _set_status("Terminated: " + name + " (" + signal +")", false);
         }
     });
 
@@ -420,21 +432,16 @@ function _stop(name, user, cb) {
         } else if (cb) {
             cb();
         }
-    } else {
-        const running = (runner.get_status(name) == 'running');
+    } else if (name != REPOS_NAME) {
+        _set_status("Terminating: " + name + "...", false);
 
-        if (name != REPOS_NAME && running) {
-            if (user) {
-                runner.stop(name);
-                _set_status("Stopped: " + name, false);
-            } else {
-                runner.terminate(name);
-            }
+        if (user) {
+            runner.stop(name, cb);
+        } else {
+            runner.terminate(name, cb);
         }
-
-        if (cb) {
-            cb();
-        }
+    } else if (cb) {
+        cb();
     }
 }
 
@@ -582,14 +589,16 @@ function _query_updates(cb, name) {
 }
 
 function _set_status(message, is_error) {
-    if (status_cb) {
-        status_cb(message, is_error);
-    }
+    const date = new Date();
 
     if (is_error) {
-        console.error('Err:', message);
+        console.error(date.toISOString(), '- Err:', message);
     } else {
-        console.log('Inf:', message);
+        console.log(date.toISOString(), '- Inf:', message);
+    }
+
+    if (status_cb) {
+        status_cb(message, is_error);
     }
 }
 
