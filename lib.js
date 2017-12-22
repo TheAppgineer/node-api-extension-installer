@@ -113,8 +113,6 @@ function ApiExtensionInstaller(callbacks, inherit_mode, self_control) {
                 }
             });
         });
-
-        _query_updates();
     }
 }
 
@@ -234,6 +232,8 @@ function _load_repository() {
             if (repository_cb) {
                 repository_cb(values);
             }
+
+            _query_updates();
         }
     });
 }
@@ -245,9 +245,9 @@ function _get_name(repos_index) {
 function _get_name_from_url(url) {
     let substrings = url.split(':');
 
-    if ((substrings[0]) == 'https') {
+    if (substrings[0] == 'https') {
         substrings = substrings[1].split('.')
-        if ((substrings[2]) == 'git') {
+        if (substrings[2].indexOf('git') === 0) {
             substrings = substrings[1].split('/')
             return substrings[2];
         }
@@ -289,18 +289,20 @@ function _register_version(name, update) {
 
         if (name == REPOS_NAME) {
             _load_repository();
-        } else if (update) {
-            if (!self_update_pending && runner.get_status(name) != 'stopped') {
+        } else {
+            if (update) {
+                if (!self_update_pending && runner.get_status(name) != 'stopped') {
+                    _start(name);
+                }
+            } else {
                 _start(name);
             }
-        } else {
-            _start(name);
+
+            _query_updates(null, name);
         }
 
         _remove_action(name);
     }, name);   // Query installed extension to obtain version number
-
-    _query_updates(null, name);
 }
 
 function _update(name, cb) {
@@ -311,7 +313,7 @@ function _update(name, cb) {
                 const backup_file = extension_root + backup_dir + name + '.tar';
                 const options = { file: backup_file, cwd: cwd };
 
-                _backup(options, (clean) => {
+                _backup(name, options, (clean) => {
                     _set_status("Updating: " + name + "...", false);
 
                     let exec = require('child_process').exec;
@@ -340,33 +342,74 @@ function _update(name, cb) {
     }
 }
 
-function _backup(options, cb) {
+function _backup(name, options, cb) {
     const fs = require('fs');
-    const tar = require('tar');
 
     fs.readFile(options.cwd + '.npmignore', 'utf8', function(err, data) {
-        let globs = [];
-
-        if (!err) {
-            const lines = data.split('\n');
-
-            for (let i = 0; i < lines.length; i++) {
-                let line = lines[i].trim();
-
-                if (line && line != 'node_modules' && line[0] != '#') {
-                    if (fs.existsSync(options.cwd + line)) {
-                        globs.push(line);
-                    }
-                }
-            }
-        }
-
-        if (globs.length) {
-            tar.create(options, globs, cb);
-        } else if (cb) {
-            cb(true);
+        if (err) {
+            _download_gitignore(name, (data) => {
+                _create_archive(data.toString(), options, cb);
+            });
+        } else {
+            _create_archive(data, options, cb);
         }
     });
+}
+
+function _download_gitignore(name, cb) {
+    let git;
+
+    // Get git url from repository
+    for (let i = COMMUNITY_INDEX; i < repos.length; i++) {
+        const url = repos[i].repository.url;
+
+        if (_get_name_from_url(url) == name) {
+            git = url;
+            break;
+        }
+    }
+
+    if (git && git.includes('github')) {
+        const https = require('https');
+        const parts = git.split('#');
+        const branch = (parts.length > 1 ? parts[1] : 'master');
+
+        let url = parts[0].replace('.git', '/' + branch + '/.gitignore');
+        url = url.replace('github', 'raw.githubusercontent');
+        console.log('git url:', git);
+        console.log('url:', url);
+
+        https.get(url, (response) => {
+            response.on('data', (data) => {
+                if (cb) {
+                    cb(data);
+                }
+            });
+        });
+    }
+}
+
+function _create_archive(data, options, cb) {
+    const fs = require('fs');
+    const tar = require('tar');
+    const lines = data.split('\n');
+    let globs = [];
+
+    for (let i = 0; i < lines.length; i++) {
+        let line = lines[i].trim();
+
+        if (line && line != 'node_modules' && line[0] != '#') {
+            if (fs.existsSync(options.cwd + line)) {
+                globs.push(line);
+            }
+        }
+    }
+
+    if (globs.length) {
+        tar.create(options, globs, cb);
+    } else if (cb) {
+        cb(true);
+    }
 }
 
 function _uninstall(name, cb) {
