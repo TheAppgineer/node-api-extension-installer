@@ -371,7 +371,7 @@ function _backup(name, options, cb) {
     fs.readFile(options.cwd + '.npmignore', 'utf8', (err, data) => {
         if (err) {
             // Working directory clean
-            cb(true);
+            cb && cb(true);
         } else {
             _create_archive(data, options, cb);
         }
@@ -402,10 +402,14 @@ function _download_gitignore(name, cb) {
 
         https.get(url, (response) => {
             response.on('data', (data) => {
-                if (cb) {
-                    cb(data);
+                if (response.statusCode == 200) {
+                    cb && cb(data);
+                } else {
+                    console.error(data.toString());
                 }
             });
+        }).on('error', (err) => {
+            console.error(err);
         });
     }
 }
