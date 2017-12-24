@@ -96,7 +96,7 @@ function ApiExtensionInstaller(callbacks, inherit_mode, self_control) {
             // Create backup directory, used during update
             mkdirp(extension_root + backup_dir, (err, made) => {
                 if (err) {
-                    console.log(err);
+                    console.error(err);
                 }
             });
 
@@ -108,6 +108,7 @@ function ApiExtensionInstaller(callbacks, inherit_mode, self_control) {
             }
 
             runner = new ApiExtensionRunner((running) => {
+                // Start previously running extensions
                 for (let i = 0; i < running.length; i++) {
                     _start(running[i]);
                 }
@@ -229,11 +230,16 @@ function _load_repository() {
 
             _set_status("Extension Repository loaded", false);
 
-            if (repository_cb) {
-                repository_cb(values);
+            if (installed[MANAGER_NAME]) {
+                _post_install(MANAGER_NAME);
             }
 
             _query_updates();
+
+            // User callback
+            if (repository_cb) {
+                repository_cb(values);
+            }
         }
     });
 }
@@ -267,8 +273,8 @@ function _install(git, cb) {
             if (err) {
                 _set_status("Installation failed: " + name, true);
                 console.error(stderr);
-            } else if (cb) {
-                cb(name);
+            } else {
+                _post_install(name, undefined, cb);
             }
         });
     }
@@ -306,50 +312,66 @@ function _register_version(name, update) {
 }
 
 function _update(name, cb) {
-    if (name) {
-        if (self_update || name != MANAGER_NAME) {
-            _stop(name, false, () => {
-                const cwd = extension_root + module_dir + name + '/';
-                const backup_file = extension_root + backup_dir + name + '.tar';
-                const options = { file: backup_file, cwd: cwd };
+    if (name && (self_update || name != MANAGER_NAME)) {
+        _stop(name, false, () => {
+            const cwd = extension_root + module_dir + name + '/';
+            const backup_file = extension_root + backup_dir + name + '.tar';
+            const options = { file: backup_file, cwd: cwd };
 
-                _backup(name, options, (clean) => {
-                    _set_status("Updating: " + name + "...", false);
+            _backup(name, options, (clean) => {
+                _set_status("Updating: " + name + "...", false);
 
-                    let exec = require('child_process').exec;
-                    exec('npm update -g ' + name, (err, stdout, stderr) => {
-                        if (err) {
-                            _set_status("Update failed: " + name, true);
-                            console.error(stderr);
-                        } else if (clean) {
-                            if (cb) {
-                                cb(name);
-                            }
-                        } else {
-                            const tar = require('tar');
-                            tar.extract(options, [], () => {
-                                if (cb) {
-                                    cb(name);
-                                }
-                            });
-                        }
-                    });
+                let exec = require('child_process').exec;
+                exec('npm update -g ' + name, (err, stdout, stderr) => {
+                    if (err) {
+                        _set_status("Update failed: " + name, true);
+                        console.error(stderr);
+                    } else {
+                        _post_install(name, (clean ? undefined : options), cb);
+                    }
                 });
             });
-        } else {
-            _stop(name, false, _exit_for_update);
-        }
+        });
+    } else {
+        _stop(name, false, _exit_for_update);
     }
+}
+
+function _post_install(name, options, cb) {
+    const fs = require('fs');
+    const npmignore = extension_root + module_dir + name + '/' + '.npmignore';
+
+    fs.readFile(npmignore, 'utf8', (err, data) => {
+        if (err) {
+            _download_gitignore(name, (data) => {
+                fs.writeFile(npmignore, data, (err) => {
+                    if (err) {
+                        console.error(err);
+                    }
+                });
+            });
+        }
+
+        if (options) {
+            const tar = require('tar');
+            tar.extract(options, [], () => {
+                if (cb) {
+                    cb(name);
+                }
+            });
+        } else if (cb) {
+            cb(name);
+        }
+    });
 }
 
 function _backup(name, options, cb) {
     const fs = require('fs');
 
-    fs.readFile(options.cwd + '.npmignore', 'utf8', function(err, data) {
+    fs.readFile(options.cwd + '.npmignore', 'utf8', (err, data) => {
         if (err) {
-            _download_gitignore(name, (data) => {
-                _create_archive(data.toString(), options, cb);
-            });
+            // Working directory clean
+            cb(true);
         } else {
             _create_archive(data, options, cb);
         }
@@ -360,7 +382,7 @@ function _download_gitignore(name, cb) {
     let git;
 
     // Get git url from repository
-    for (let i = COMMUNITY_INDEX; i < repos.length; i++) {
+    for (let i = 0; i < repos.length; i++) {
         const url = repos[i].repository.url;
 
         if (_get_name_from_url(url) == name) {
@@ -376,7 +398,6 @@ function _download_gitignore(name, cb) {
 
         let url = parts[0].replace('.git', '/' + branch + '/.gitignore');
         url = url.replace('github', 'raw.githubusercontent');
-        console.log('git url:', git);
         console.log('url:', url);
 
         https.get(url, (response) => {
@@ -518,7 +539,8 @@ function _perform_action() {
                 break;
             case ACTION_UPDATE:
                 if (name == MANAGER_NAME) {
-                    _update(name, _start);
+                    let cb = (runner.get_status(name) == 'running' ? _start : undefined);
+                    _update(name, cb);
                 } else {
                     _update(name, _register_updated_version);
                 }
@@ -607,25 +629,30 @@ function _query_updates(cb, name) {
             console.error(stderr);
         } else {
             const lines = stdout.split('\n');
-            let updates = {};
+            let results = {};
+            let changes = {};
 
             for (let i = 1; i < lines.length && lines[i]; i++) {
                 const fields = lines[i].split(/[ ]+/);    // Split by space(s)
                 const update_name = fields[0];
                 const update_wanted = fields[2];
 
-                updates[update_name] = update_wanted;
-                updates_list[update_name] = update_wanted;
+                results[update_name] = update_wanted;
+
+                if (updates_list[update_name] != update_wanted) {
+                    updates_list[update_name] = update_wanted;
+                    changes[update_name] = update_wanted;
+                }
             }
 
             // User callback
-            if (updates_cb) {
-                // Supply full update list
-                updates_cb(updates_list);
+            if (updates_cb && Object.keys(changes).length) {
+                // Supply change list
+                updates_cb(changes);
             }
             // Internal callback
             if (cb) {
-                cb(updates);
+                cb(results);
             }
         }
     });
