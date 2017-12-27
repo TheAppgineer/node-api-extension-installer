@@ -228,6 +228,8 @@ function _load_repository() {
                 });
             }
 
+            values.sort(_compare);
+
             _set_status("Extension Repository loaded", false);
 
             if (installed[MANAGER_NAME]) {
@@ -242,6 +244,16 @@ function _load_repository() {
             }
         }
     });
+}
+
+function _compare(a, b) {
+    if (a.title < b.title) {
+        return -1;
+    }
+    if (a.title > b.title) {
+        return 1;
+    }
+    return 0;
 }
 
 function _get_name(repos_index) {
