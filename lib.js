@@ -41,7 +41,8 @@ const ACTION_INSTALL = 1;
 const ACTION_UPDATE = 2;
 const ACTION_UNINSTALL = 3;
 const ACTION_START = 4;
-const ACTION_STOP = 5;
+const ACTION_RESTART = 5;
+const ACTION_STOP = 6;
 
 const module_dir = 'node_modules/'
 const backup_dir = 'backup/'
@@ -169,7 +170,7 @@ ApiExtensionInstaller.prototype.restart_manager = function() {
  * Returns the status of an extension identified by name
  *
  * @param {String} name - The name of the extension according to its package.json file
- * @returns {('not_installed'|'installed'|'stopped'|'running')} - The current status of the extension
+ * @returns {('not_installed'|'stopped'|'terminated'|'running')} - The status of the extension
  */
 ApiExtensionInstaller.prototype.get_status = function(repos_index) {
     const name = _get_name(repos_index);
@@ -188,6 +189,30 @@ ApiExtensionInstaller.prototype.get_status = function(repos_index) {
 
 ApiExtensionInstaller.prototype.get_details = function(repos_index) {
     return repos[repos_index];
+}
+
+ApiExtensionInstaller.prototype.get_actions = function(repos_index) {
+    const state = ApiExtensionInstaller.prototype.get_status.call(repos_index).state;
+    let actions = [];
+
+    if (state == 'not_installed') {
+        actions.push(ACTION_INSTALL);
+    } else {
+        if (ApiExtensionInstaller.prototype.has_update(repos_index)) {
+            actions.push(ACTION_UPDATE);
+        }
+        if (repos_index >= COMMUNITY_INDEX) {
+            actions.push(ACTION_UNINSTALL);
+        }
+        if (state == 'running') {
+            actions.push(ACTION_RESTART);
+            actions.push(ACTION_STOP);
+        } else {
+            actions.push(ACTION_START);
+        }
+    }
+
+    return actions;
 }
 
 function _check_prerequisites() {
@@ -247,10 +272,10 @@ function _load_repository() {
 }
 
 function _compare(a, b) {
-    if (a.title < b.title) {
+    if (a.title.toLowerCase() < b.title.toLowerCase()) {
         return -1;
     }
-    if (a.title > b.title) {
+    if (a.title.toLowerCase() > b.title.toLowerCase()) {
         return 1;
     }
     return 0;
@@ -451,8 +476,9 @@ function _create_archive(data, options, cb) {
 
 function _uninstall(name, cb) {
     if (name) {
-        _set_status("Uninstalling: " + name + "...", false);
         _stop(name, true, () => {
+            _set_status("Uninstalling: " + name + "...", false);
+
             let exec = require('child_process').exec;
             exec('npm uninstall -g ' + name, (err, stdout, stderr) => {
                 // Internal callback
