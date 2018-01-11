@@ -1,4 +1,4 @@
-// Copyright 2017 The Appgineer
+// Copyright 2017, 2018 The Appgineer
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -15,22 +15,38 @@
 "use strict";
 
 // Default repository entries
+const UPDATER_GIT = "https://github.com/TheAppgineer/roon-extension-manager-updater.git";
+const UPDATER_NAME = "roon-extension-manager-updater";
+
 const MANAGER_GIT = "https://github.com/TheAppgineer/roon-extension-manager.git";
 const MANAGER_NAME = "roon-extension-manager";
 
 const REPOS_GIT = "https://github.com/TheAppgineer/roon-extension-repository.git";
 const REPOS_NAME = 'roon-extension-repository';
 
-// Start index of community extensions
-const COMMUNITY_INDEX = 2;
+// Start indexes of extension categories
+const EXPOSED_START_INDEX = 1;
+const COMMUNITY_START_INDEX = 3;
 
 const repos_base = [{
+    repository: {
+        type: "git",
+        url: UPDATER_GIT
+    }
+},
+{
+    author: "The Appgineer",
+    display_name: "Extension Manager",
+    description: "Roon Extension for managing Roon Extensions",
     repository: {
         type: "git",
         url: MANAGER_GIT
     }
 },
 {
+    author: "The Appgineer",
+    display_name: "Extension Repository",
+    description: "Repository of (community developed) Roon Extensions",
     repository: {
         type: "git",
         url: REPOS_GIT
@@ -136,10 +152,6 @@ ApiExtensionInstaller.prototype.update_all = function() {
     _query_updates(_queue_updates);
 }
 
-ApiExtensionInstaller.prototype.has_update = function(repos_index) {
-    return updates_list[_get_name(repos_index)];
-}
-
 ApiExtensionInstaller.prototype.start = function(repos_index) {
     _start(_get_name(repos_index));
 }
@@ -170,14 +182,14 @@ ApiExtensionInstaller.prototype.restart_manager = function() {
  * Returns the status of an extension identified by name
  *
  * @param {String} name - The name of the extension according to its package.json file
- * @returns {('not_installed'|'stopped'|'terminated'|'running')} - The status of the extension
+ * @returns {('not_installed'|'installed'|'stopped'|'terminated'|'running')} - The status of the extension
  */
 ApiExtensionInstaller.prototype.get_status = function(repos_index) {
     const name = _get_name(repos_index);
     const version = installed[name];
     let state = (version ? 'installed' : 'not_installed');
 
-    if (state == 'installed') {
+    if (state == 'installed' && repos_index >= COMMUNITY_START_INDEX) {
         state = runner.get_status(name);
     }
 
@@ -192,23 +204,25 @@ ApiExtensionInstaller.prototype.get_details = function(repos_index) {
 }
 
 ApiExtensionInstaller.prototype.get_actions = function(repos_index) {
-    const state = ApiExtensionInstaller.prototype.get_status.call(repos_index).state;
+    const state = ApiExtensionInstaller.prototype.get_status.call(this, repos_index).state;
     let actions = [];
 
     if (state == 'not_installed') {
         actions.push(ACTION_INSTALL);
     } else {
-        if (ApiExtensionInstaller.prototype.has_update(repos_index)) {
+        if (updates_list[_get_name(repos_index)]) {
             actions.push(ACTION_UPDATE);
         }
-        if (repos_index >= COMMUNITY_INDEX) {
+
+        if (repos_index >= COMMUNITY_START_INDEX) {
             actions.push(ACTION_UNINSTALL);
-        }
-        if (state == 'running') {
-            actions.push(ACTION_RESTART);
-            actions.push(ACTION_STOP);
-        } else {
-            actions.push(ACTION_START);
+
+            if (state == 'running') {
+                actions.push(ACTION_RESTART);
+                actions.push(ACTION_STOP);
+            } else {
+                actions.push(ACTION_START);
+            }
         }
     }
 
@@ -246,7 +260,7 @@ function _load_repository() {
             repos = repos_base.concat(JSON.parse(data));
 
             // Collect extension names
-            for (let i = COMMUNITY_INDEX; i < repos.length; i++) {
+            for (let i = EXPOSED_START_INDEX; i < repos.length; i++) {
                 values.push({
                     title: repos[i].display_name,
                     value: i
@@ -605,6 +619,7 @@ function _queue_updates(updates) {
 
     if (self_update_pending) {
         // Perform manager actions last
+        _queue_action(UPDATER_NAME, { action: ACTION_UPDATE });
         _queue_action(MANAGER_NAME, { action: ACTION_UPDATE });
     }
 }
