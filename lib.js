@@ -363,28 +363,30 @@ function _register_version(name, update) {
 }
 
 function _update(name, cb) {
-    if (name && (self_update || name != MANAGER_NAME)) {
-        _stop(name, false, () => {
-            const cwd = extension_root + module_dir + name + '/';
-            const backup_file = extension_root + backup_dir + name + '.tar';
-            const options = { file: backup_file, cwd: cwd };
+    if (name) {
+        if (self_update || name != MANAGER_NAME) {
+            _stop(name, false, () => {
+                const cwd = extension_root + module_dir + name + '/';
+                const backup_file = extension_root + backup_dir + name + '.tar';
+                const options = { file: backup_file, cwd: cwd };
 
-            _backup(name, options, (clean) => {
-                _set_status("Updating: " + name + "...", false);
+                _backup(name, options, (clean) => {
+                    _set_status("Updating: " + name + "...", false);
 
-                let exec = require('child_process').exec;
-                exec('npm update -g ' + name, (err, stdout, stderr) => {
-                    if (err) {
-                        _set_status("Update failed: " + name, true);
-                        console.error(stderr);
-                    } else {
-                        _post_install(name, (clean ? undefined : options), cb);
-                    }
+                    let exec = require('child_process').exec;
+                    exec('npm update -g ' + name, (err, stdout, stderr) => {
+                        if (err) {
+                            _set_status("Update failed: " + name, true);
+                            console.error(stderr);
+                        } else {
+                            _post_install(name, (clean ? undefined : options), cb);
+                        }
+                    });
                 });
             });
-        });
-    } else {
-        _stop(name, false, _exit_for_update);
+        } else {
+            _stop(name, false, _exit_for_update);
+        }
     }
 }
 
@@ -595,8 +597,8 @@ function _perform_action() {
                 break;
             case ACTION_UPDATE:
                 if (name == MANAGER_NAME) {
-                    let cb = (runner.get_status(name) == 'running' ? _start : undefined);
-                    _update(name, cb);
+                    // TODO: Add support for update only case
+                    _update(name, _start);
                 } else {
                     _update(name, _register_updated_version);
                 }
@@ -619,7 +621,9 @@ function _queue_updates(updates) {
 
     if (self_update_pending) {
         // Perform manager actions last
-        _queue_action(UPDATER_NAME, { action: ACTION_UPDATE });
+        if (updates_list[UPDATER_NAME]) {
+            _queue_action(UPDATER_NAME, { action: ACTION_UPDATE });
+        }
         _queue_action(MANAGER_NAME, { action: ACTION_UPDATE });
     }
 }
