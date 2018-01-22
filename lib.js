@@ -14,44 +14,42 @@
 
 "use strict";
 
-// Default repository entries
-const UPDATER_GIT = "https://github.com/TheAppgineer/roon-extension-manager-updater.git";
+// System repository entries
+const SYSTEM_NAME = "System";
+
 const UPDATER_NAME = "roon-extension-manager-updater";
-
-const MANAGER_GIT = "https://github.com/TheAppgineer/roon-extension-manager.git";
 const MANAGER_NAME = "roon-extension-manager";
-
-const REPOS_GIT = "https://github.com/TheAppgineer/roon-extension-repository.git";
 const REPOS_NAME = 'roon-extension-repository';
 
-// Start indexes of extension categories
-const EXPOSED_START_INDEX = 1;
-const COMMUNITY_START_INDEX = 3;
+const MIN_REPOS_VERSION = "0.2.0"
 
-const repos_base = [{
-    repository: {
-        type: "git",
-        url: UPDATER_GIT
-    }
-},
-{
-    author: "The Appgineer",
-    display_name: "Extension Manager",
-    description: "Roon Extension for managing Roon Extensions",
-    repository: {
-        type: "git",
-        url: MANAGER_GIT
-    }
-},
-{
-    author: "The Appgineer",
-    display_name: "Extension Repository",
-    description: "Repository of (community developed) Roon Extensions",
-    repository: {
-        type: "git",
-        url: REPOS_GIT
-    }
-}];
+const repos_system = {
+    display_name: SYSTEM_NAME,
+    extensions: [{
+        repository: {
+            type: "git",
+            url: "https://github.com/TheAppgineer/roon-extension-manager-updater.git"
+        }
+    },
+    {
+        author: "The Appgineer",
+        display_name: "Extension Manager",
+        description: "Roon Extension for managing Roon Extensions",
+        repository: {
+            type: "git",
+            url: "https://github.com/TheAppgineer/roon-extension-manager.git"
+        }
+    },
+    {
+        author: "The Appgineer",
+        display_name: "Extension Repository",
+        description: "Repository of (community developed) Roon Extensions",
+        repository: {
+            type: "git",
+            url: "https://github.com/TheAppgineer/roon-extension-repository.git#develop"
+        }
+    }]
+};
 
 const ACTION_INSTALL = 1;
 const ACTION_UPDATE = 2;
@@ -70,6 +68,7 @@ var ApiExtensionRunner = require('node-api-extension-runner');
 var runner;
 var extension_root;
 var repos = [];
+var index_cache = {};
 var installed = {};
 var updates_list = {};
 var action_queue = {};
@@ -120,6 +119,8 @@ function ApiExtensionInstaller(callbacks, inherit_mode, self_control) {
             if (!installed[REPOS_NAME]) {
                 // Install extension repository
                 _queue_action(REPOS_NAME, { action: ACTION_INSTALL, url: REPOS_GIT });
+            } else if ( installed[REPOS_NAME] < MIN_REPOS_VERSION) {
+                _queue_action(REPOS_NAME, { action: ACTION_UPDATE });
             } else {
                 _load_repository();
             }
@@ -134,38 +135,60 @@ function ApiExtensionInstaller(callbacks, inherit_mode, self_control) {
     }
 }
 
-ApiExtensionInstaller.prototype.install = function(repos_index) {
-    const url = repos[repos_index].repository.url;
+ApiExtensionInstaller.prototype.get_extensions_by_category = function(category_index) {
+    const extensions = repos[category_index].extensions;
+    let values = [];
 
-    _queue_action(_get_name_from_url(url), { action: ACTION_INSTALL, url: url });
+    // Collect extensions
+    for (let i = 0; i < extensions.length; i++) {
+        if (extensions[i].display_name) {
+            const name = _get_name_from_url(extensions[i].repository.url);
+
+            values.push({
+                title: extensions[i].display_name,
+                value: name
+            });
+
+            index_cache[name] = '' + category_index + ':' + i;
+        }
+    }
+
+    values.sort(_compare);
+
+    return values;
 }
 
-ApiExtensionInstaller.prototype.uninstall = function(repos_index) {
-    _queue_action(_get_name(repos_index), { action: ACTION_UNINSTALL });
+ApiExtensionInstaller.prototype.install = function(name) {
+    const index_pair = index_cache[name].split(':');
+    const url = repos[index_pair[0]].extensions[index_pair[1]].repository.url;
+
+    _queue_action(name, { action: ACTION_INSTALL, url: url });
 }
 
-ApiExtensionInstaller.prototype.update = function(repos_index) {
-    _query_updates(_queue_updates, _get_name(repos_index));
+ApiExtensionInstaller.prototype.uninstall = function(name) {
+    _queue_action(name, { action: ACTION_UNINSTALL });
+}
+
+ApiExtensionInstaller.prototype.update = function(name) {
+    _query_updates(_queue_updates, name);
 }
 
 ApiExtensionInstaller.prototype.update_all = function() {
     _query_updates(_queue_updates);
 }
 
-ApiExtensionInstaller.prototype.start = function(repos_index) {
-    _start(_get_name(repos_index));
+ApiExtensionInstaller.prototype.start = function(name) {
+    _start(name);
 }
 
-ApiExtensionInstaller.prototype.restart = function(repos_index) {
-    const name = _get_name(repos_index);
-
+ApiExtensionInstaller.prototype.restart = function(name) {
     runner.restart(name, () => {
         _set_status("Restarted: " + name, false);
     });
 }
 
-ApiExtensionInstaller.prototype.stop = function(repos_index) {
-    _stop(_get_name(repos_index), true);
+ApiExtensionInstaller.prototype.stop = function(name) {
+    _stop(name, true);
 }
 
 ApiExtensionInstaller.prototype.restart_manager = function() {
@@ -184,12 +207,11 @@ ApiExtensionInstaller.prototype.restart_manager = function() {
  * @param {String} name - The name of the extension according to its package.json file
  * @returns {('not_installed'|'installed'|'stopped'|'terminated'|'running')} - The status of the extension
  */
-ApiExtensionInstaller.prototype.get_status = function(repos_index) {
-    const name = _get_name(repos_index);
+ApiExtensionInstaller.prototype.get_status = function(name) {
     const version = installed[name];
     let state = (version ? 'installed' : 'not_installed');
 
-    if (state == 'installed' && repos_index >= COMMUNITY_START_INDEX) {
+    if (state == 'installed' && repos[index_cache[name].split(':')[0]].display_name != SYSTEM_NAME) {
         state = runner.get_status(name);
     }
 
@@ -199,22 +221,24 @@ ApiExtensionInstaller.prototype.get_status = function(repos_index) {
     };
 }
 
-ApiExtensionInstaller.prototype.get_details = function(repos_index) {
-    return repos[repos_index];
+ApiExtensionInstaller.prototype.get_details = function(name) {
+    const index_pair = index_cache[name].split(':');
+
+    return repos[index_pair[0]].extensions[index_pair[1]];
 }
 
-ApiExtensionInstaller.prototype.get_actions = function(repos_index) {
-    const state = ApiExtensionInstaller.prototype.get_status.call(this, repos_index).state;
+ApiExtensionInstaller.prototype.get_actions = function(name) {
+    const state = ApiExtensionInstaller.prototype.get_status.call(this, name).state;
     let actions = [];
 
     if (state == 'not_installed') {
         actions.push(ACTION_INSTALL);
     } else {
-        if (updates_list[_get_name(repos_index)]) {
+        if (updates_list[name]) {
             actions.push(ACTION_UPDATE);
         }
 
-        if (repos_index >= COMMUNITY_START_INDEX) {
+        if (repos[index_cache[name].split(':')[0]].display_name != SYSTEM_NAME) {
             actions.push(ACTION_UNINSTALL);
 
             if (state == 'running') {
@@ -257,17 +281,18 @@ function _load_repository() {
         } else {
             let values = [];
 
-            repos = repos_base.concat(JSON.parse(data));
+            repos.push(repos_system);
+            repos = repos.concat(JSON.parse(data));
 
-            // Collect extension names
-            for (let i = EXPOSED_START_INDEX; i < repos.length; i++) {
-                values.push({
-                    title: repos[i].display_name,
-                    value: i
-                });
+            // Collect extension categories
+            for (let i = 0; i < repos.length; i++) {
+                if (repos[i].display_name) {
+                    values.push({
+                        title: repos[i].display_name,
+                        value: i
+                    });
+                }
             }
-
-            values.sort(_compare);
 
             _set_status("Extension Repository loaded", false);
 
@@ -295,14 +320,10 @@ function _compare(a, b) {
     return 0;
 }
 
-function _get_name(repos_index) {
-    return _get_name_from_url(repos[repos_index].repository.url);
-}
-
 function _get_name_from_url(url) {
-    let substrings = url.split(':');
+    let substrings = url && url.split(':');
 
-    if (substrings[0] == 'https') {
+    if (substrings && substrings[0] == 'https') {
         substrings = substrings[1].split('.')
         if (substrings[2].indexOf('git') === 0) {
             substrings = substrings[1].split('/')
@@ -435,12 +456,24 @@ function _download_gitignore(name, cb) {
     let git;
 
     // Get git url from repository
-    for (let i = 0; i < repos.length; i++) {
-        const url = repos[i].repository.url;
+    if (index_cache[name]) {
+        const index_pair = index_cache[name].split(':');
 
-        if (_get_name_from_url(url) == name) {
-            git = url;
-            break;
+        git = repos[index_pair[0]].extensions[index_pair[1]].repository.url;
+    } else {
+        for (let i = 0; i < repos.length && !git; i++) {
+            const extensions = repos[i].extensions;
+
+            for (let j = 0; j < extensions.length; j++) {
+                const entry_name = _get_name_from_url(extensions[j].repository.url);
+
+                index_cache[entry_name] = '' + i + ':' + j;
+
+                if (entry_name == name) {
+                    git = extensions[j].repository.url;
+                    break;
+                }
+            }
         }
     }
 
