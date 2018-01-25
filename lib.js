@@ -182,9 +182,13 @@ ApiExtensionInstaller.prototype.start = function(name) {
 }
 
 ApiExtensionInstaller.prototype.restart = function(name) {
-    runner.restart(name, () => {
-        _set_status("Restarted: " + name, false);
-    });
+    if (name == MANAGER_NAME) {
+        ApiExtensionInstaller.prototype.restart_manager.call(this);
+    } else {
+        runner.restart(name, () => {
+            _set_status("Restarted: " + name, false);
+        });
+    }
 }
 
 ApiExtensionInstaller.prototype.stop = function(name) {
@@ -247,6 +251,8 @@ ApiExtensionInstaller.prototype.get_actions = function(name) {
             } else {
                 actions.push(ACTION_START);
             }
+        } else if (name == MANAGER_NAME) {
+            actions.push(ACTION_RESTART);
         }
     }
 
