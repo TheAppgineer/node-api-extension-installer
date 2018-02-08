@@ -1,6 +1,6 @@
 {
     "name": "node-api-extension-installer",
-    "version": "0.6.0",
+    "version": "0.6.1",
     "description": "Node API providing a Roon extension installer via wrapped npm commands",
     "main": "lib.js",
     "author": "The Appgineer",

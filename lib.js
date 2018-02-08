@@ -21,6 +21,8 @@ const UPDATER_NAME = "roon-extension-manager-updater";
 const MANAGER_NAME = "roon-extension-manager";
 const REPOS_NAME = 'roon-extension-repository';
 
+const REPOS_GIT = "https://github.com/TheAppgineer/roon-extension-repository.git";
+
 const MIN_REPOS_VERSION = "0.2.0"
 
 const repos_system = {
@@ -46,7 +48,7 @@ const repos_system = {
         description: "Repository of (community developed) Roon Extensions",
         repository: {
             type: "git",
-            url: "https://github.com/TheAppgineer/roon-extension-repository.git#develop"
+            url: REPOS_GIT
         }
     }]
 };
