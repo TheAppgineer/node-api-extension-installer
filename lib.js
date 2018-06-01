@@ -62,6 +62,7 @@ const ACTION_STOP = 6;
 
 const module_dir = 'node_modules/'
 const backup_dir = 'backup/'
+const repos_dir = 'repos/'
 const perform_update = 66;
 const perform_restart = 67;
 
@@ -281,17 +282,21 @@ function _check_prerequisites() {
 
 function _load_repository() {
     const fs = require('fs');
-    let repos_path = extension_root + module_dir + REPOS_NAME + '/repository.json'
+    let main_repo = extension_root + module_dir + REPOS_NAME + '/repository.json';
+    let local_repos = extension_root + repos_dir;
+    let values = [];
 
-    fs.readFile(repos_path, 'utf8', function(err, data) {
-        if (err) {
-            _set_status("Extension Repository not found", true);
-        } else {
-            let values = [];
+    repos.push(repos_system);
+    _add_to_repository(main_repo);
 
-            repos.push(repos_system);
-            repos = repos.concat(JSON.parse(data));
+    fs.readdir(local_repos, (err, files) => {
+        if (!err) {
+            for(let i = 0; i < files.length; i++) {
+                _add_to_repository(local_repos + files[i]);
+            };
+        }
 
+        if (repos.length) {
             // Collect extension categories
             for (let i = 0; i < repos.length; i++) {
                 if (repos[i].display_name) {
@@ -309,13 +314,42 @@ function _load_repository() {
             }
 
             _query_updates();
+        } else {
+            _set_status("Extension Repository not found", true);
+        }
 
-            // User callback
-            if (repository_cb) {
-                repository_cb(values);
-            }
+        // User callback
+        if (repository_cb) {
+            repository_cb(values);
         }
     });
+}
+
+function _add_to_repository(file) {
+    if (file.includes('.json')) {
+        const fs = require('fs');
+        const data = fs.readFileSync(file, 'utf8');
+
+        if (data) {
+            let new_repo = JSON.parse(data);
+
+            for (let i = 0; i < new_repo.length; i++) {
+                const category = new_repo[i].display_name;
+                let j = 0;
+
+                for (; j < repos.length; j++) {
+                    if (repos[j].display_name == category) {
+                        repos[j].extensions = repos[j].extensions.concat(new_repo[i].extensions);
+                        break;
+                    }
+                }
+
+                if (j === repos.length) {
+                    repos.push(new_repo[i]);
+                }
+            }
+        }
+    }
 }
 
 function _compare(a, b) {
@@ -652,20 +686,24 @@ function _perform_action() {
 }
 
 function _queue_updates(updates) {
-    for (const name in updates) {
-        if (name == MANAGER_NAME) {
-            self_update_pending = true;     // Prevent extension restarts
-        } else {
-            _queue_action(name, { action: ACTION_UPDATE });
+    if (Object.keys(updates).length) {
+        for (const name in updates) {
+            if (name == MANAGER_NAME) {
+                self_update_pending = true;     // Prevent extension restarts
+            } else {
+                _queue_action(name, { action: ACTION_UPDATE });
+            }
         }
-    }
 
-    if (self_update_pending) {
-        // Perform manager actions last
-        if (updates_list[UPDATER_NAME]) {
-            _queue_action(UPDATER_NAME, { action: ACTION_UPDATE });
+        if (self_update_pending) {
+            // Perform manager actions last
+            if (updates_list[UPDATER_NAME]) {
+                _queue_action(UPDATER_NAME, { action: ACTION_UPDATE });
+            }
+            _queue_action(MANAGER_NAME, { action: ACTION_UPDATE });
         }
-        _queue_action(MANAGER_NAME, { action: ACTION_UPDATE });
+    } else {
+        console.log("No updates found");
     }
 }
 
