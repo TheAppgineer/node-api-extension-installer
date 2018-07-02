@@ -60,9 +60,9 @@ const ACTION_START = 4;
 const ACTION_RESTART = 5;
 const ACTION_STOP = 6;
 
-const module_dir = 'node_modules/'
-const backup_dir = 'backup/'
-const repos_dir = 'repos/'
+const module_dir = 'node_modules/';
+const backup_dir = 'backup/';
+const repos_dir = 'repos/';
 const perform_update = 66;
 const perform_restart = 67;
 
@@ -161,41 +161,8 @@ ApiExtensionInstaller.prototype.get_extensions_by_category = function(category_i
     return values;
 }
 
-ApiExtensionInstaller.prototype.install = function(name) {
-    const index_pair = index_cache[name].split(':');
-    const url = repos[index_pair[0]].extensions[index_pair[1]].repository.url;
-
-    _queue_action(name, { action: ACTION_INSTALL, url: url });
-}
-
-ApiExtensionInstaller.prototype.uninstall = function(name) {
-    _queue_action(name, { action: ACTION_UNINSTALL });
-}
-
-ApiExtensionInstaller.prototype.update = function(name) {
-    _query_updates(_queue_updates, name);
-}
-
 ApiExtensionInstaller.prototype.update_all = function() {
     _query_updates(_queue_updates);
-}
-
-ApiExtensionInstaller.prototype.start = function(name) {
-    _start(name);
-}
-
-ApiExtensionInstaller.prototype.restart = function(name) {
-    if (name == MANAGER_NAME) {
-        ApiExtensionInstaller.prototype.restart_manager.call(this);
-    } else {
-        runner.restart(name, () => {
-            _set_status("Restarted: " + name, false);
-        });
-    }
-}
-
-ApiExtensionInstaller.prototype.stop = function(name) {
-    _stop(name, true);
 }
 
 ApiExtensionInstaller.prototype.restart_manager = function() {
@@ -260,6 +227,38 @@ ApiExtensionInstaller.prototype.get_actions = function(name) {
     }
 
     return actions;
+}
+
+ApiExtensionInstaller.prototype.perform_action = function(action, name) {
+    switch (action) {
+        case ACTION_INSTALL:
+            const index_pair = index_cache[name].split(':');
+            const url = repos[index_pair[0]].extensions[index_pair[1]].repository.url;
+
+            _queue_action(name, { action: ACTION_INSTALL, url: url });
+            break;
+        case ACTION_UPDATE:
+            _query_updates(_queue_updates, name);
+            break;
+        case ACTION_UNINSTALL:
+            _queue_action(name, { action: ACTION_UNINSTALL });
+            break;
+        case ACTION_START:
+            _start(name);
+            break;
+        case ACTION_RESTART:
+            if (name == MANAGER_NAME) {
+                ApiExtensionInstaller.prototype.restart_manager.call(this);
+            } else {
+                runner.restart(name, () => {
+                    _set_status("Restarted: " + name, false);
+                });
+            }
+            break;
+        case ACTION_STOP:
+            _stop(name, true);
+            break;
+    }
 }
 
 function _check_prerequisites() {
