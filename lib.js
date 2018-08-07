@@ -57,25 +57,46 @@ const ACTION_INSTALL = 1;
 const ACTION_UPDATE = 2;
 const ACTION_UNINSTALL = 3;
 const ACTION_START = 4;
-const ACTION_RESTART = 5;
-const ACTION_STOP = 6;
+const ACTION_START_AND_LOG = 5;
+const ACTION_RESTART = 6;
+const ACTION_RESTART_AND_LOG = 7;
+const ACTION_STOP = 8;
 
+const action_strings = [
+    '',
+    'Install',
+    'Update',
+    'Uninstall',
+    'Start',
+    'Start (with logging)',
+    'Restart',
+    'Restart (with logging)',
+    'Stop'
+];
+
+const stdout_write = process.stdout.write;
+const stderr_write = process.stderr.write;
 const module_dir = 'node_modules/';
 const backup_dir = 'backup/';
 const repos_dir = 'repos/';
+const log_dir = 'log/';
 const perform_update = 66;
 const perform_restart = 67;
 
+const fs = require('fs');
 var ApiExtensionRunner = require('node-api-extension-runner');
 
+var write_stream;
 var runner;
 var extension_root;
+var features = {};
 var repos = [];
 var index_cache = {};
 var installed = {};
 var updates_list = {};
 var action_queue = {};
-var stdio_inherit_mode;
+var logging_active = false;
+var logs_list = {};
 var self_update_pending = false;
 var self_update;
 
@@ -84,7 +105,10 @@ var installs_cb;
 var updates_cb;
 var status_cb;
 
-function ApiExtensionInstaller(callbacks, inherit_mode, self_control) {
+function ApiExtensionInstaller(callbacks, logging, self_control) {
+    process.on('SIGTERM', _terminate);
+    process.on('SIGINT', _terminate);
+
     if (callbacks) {
         if (callbacks.repository_changed) {
             repository_cb = callbacks.repository_changed;
@@ -100,38 +124,76 @@ function ApiExtensionInstaller(callbacks, inherit_mode, self_control) {
         }
     }
 
-    if (inherit_mode) {
-        stdio_inherit_mode = inherit_mode;
-    } else {
-        stdio_inherit_mode = 'ignore';
-    }
-
     self_update = self_control;
 
     if (_check_prerequisites()) {
         _query_installs((installed) => {
             const mkdirp = require('mkdirp');
 
-            // Create backup directory, used during update
-            mkdirp(extension_root + backup_dir, (err, made) => {
+            features = _read_JSON_file_sync(extension_root + 'features.json');
+
+            // Create log directory
+            mkdirp(extension_root + log_dir, (err, made) => {
                 if (err) {
                     console.error(err);
-                }
-            });
+                } else {
+                    let logs_array = [];
 
-            if (!installed[REPOS_NAME]) {
-                // Install extension repository
-                _queue_action(REPOS_NAME, { action: ACTION_INSTALL, url: REPOS_GIT });
-            } else if ( installed[REPOS_NAME] < MIN_REPOS_VERSION) {
-                _queue_action(REPOS_NAME, { action: ACTION_UPDATE });
-            } else {
-                _load_repository();
-            }
+                    if (!features || features.log_mode != 'off') {
+                        // Logging feature active
+                        if (logging) {
+                            // Logging enabled
+                            logs_array = _read_JSON_file_sync('logging.json');
+                            if (logs_array === undefined) logs_array = [];
 
-            runner = new ApiExtensionRunner((running) => {
-                // Start previously running extensions
-                for (let i = 0; i < running.length; i++) {
-                    _start(running[i]);
+                            if (logs_array && logs_array.includes(MANAGER_NAME)) {
+                                // Start logging of manager stdout
+                                const fd = _get_log_descriptor(MANAGER_NAME);
+                                write_stream = fs.createWriteStream('', {flags: 'a', fd: fd});
+
+                                process.stdout.write = function() {
+                                    stdout_write.apply(process.stdout, arguments);
+                                    write_stream.write.apply(write_stream, arguments);
+                                };
+                                process.stderr.write = function() {
+                                    stderr_write.apply(process.stderr, arguments);
+                                    write_stream.write.apply(write_stream, arguments);
+                                };
+                            }
+                        }
+
+                        logging_active = logging;
+                    }
+
+                    _set_status("Roon Extension Manager started!", false);
+
+                    // Create backup directory, used during update
+                    mkdirp(extension_root + backup_dir, (err, made) => {
+                        if (err) {
+                            console.error(err);
+                        }
+                    });
+
+                    if (!installed[REPOS_NAME]) {
+                        // Install extension repository
+                        _queue_action(REPOS_NAME, { action: ACTION_INSTALL, url: REPOS_GIT });
+                    } else if ( installed[REPOS_NAME] < MIN_REPOS_VERSION) {
+                        _queue_action(REPOS_NAME, { action: ACTION_UPDATE });
+                    } else {
+                        _load_repository();
+                    }
+
+                    runner = new ApiExtensionRunner(MANAGER_NAME, (running) => {
+                        // Start previously running extensions
+                        for (let i = 0; i < running.length; i++) {
+                            _start(running[i], logs_array.includes(running[i]));
+                        }
+                    });
+
+                    // User callback
+                    if (installs_cb) {
+                        installs_cb(installed);
+                    }
                 }
             });
         });
@@ -162,17 +224,13 @@ ApiExtensionInstaller.prototype.get_extensions_by_category = function(category_i
 }
 
 ApiExtensionInstaller.prototype.update_all = function() {
-    _query_updates(_queue_updates);
+    if (!features || features.auto_update != 'off') {
+        _query_updates(_queue_updates);
+    }
 }
 
 ApiExtensionInstaller.prototype.restart_manager = function() {
-    _stop(MANAGER_NAME, false, () => {
-        if (self_update) {
-            _start(MANAGER_NAME);
-        } else {
-            process.exit(perform_restart);
-        }
-    });
+    _restart(MANAGER_NAME, logging_active ? logs_list[MANAGER_NAME] : undefined);
 }
 
 /**
@@ -185,13 +243,14 @@ ApiExtensionInstaller.prototype.get_status = function(name) {
     const version = installed[name];
     let state = (version ? 'installed' : 'not_installed');
 
-    if (state == 'installed' && repos[index_cache[name].split(':')[0]].display_name != SYSTEM_NAME) {
+    if (state == 'installed' && name != REPOS_NAME) {
         state = runner.get_status(name);
     }
 
     return {
-        state: state,
-        version: version
+        state:   state,
+        version: version,
+        logging: (logs_list[name] !== undefined)
     };
 }
 
@@ -206,27 +265,47 @@ ApiExtensionInstaller.prototype.get_actions = function(name) {
     let actions = [];
 
     if (state == 'not_installed') {
-        actions.push(ACTION_INSTALL);
+        actions.push(_create_action_pair(ACTION_INSTALL));
     } else {
         if (updates_list[name]) {
-            actions.push(ACTION_UPDATE);
+            actions.push(_create_action_pair(ACTION_UPDATE));
         }
 
-        if (repos[index_cache[name].split(':')[0]].display_name != SYSTEM_NAME) {
-            actions.push(ACTION_UNINSTALL);
+        if (name == MANAGER_NAME) {
+            actions.push(_create_action_pair(ACTION_RESTART));
+            if (logging_active) {
+                actions.push(_create_action_pair(ACTION_RESTART_AND_LOG));
+            }
+        } else if (repos[index_cache[name].split(':')[0]].display_name != SYSTEM_NAME) {
+            actions.push(_create_action_pair(ACTION_UNINSTALL));
 
             if (state == 'running') {
-                actions.push(ACTION_RESTART);
-                actions.push(ACTION_STOP);
+                actions.push(_create_action_pair(ACTION_RESTART));
+                if (logging_active) {
+                    actions.push(_create_action_pair(ACTION_RESTART_AND_LOG));
+                }
+                actions.push(_create_action_pair(ACTION_STOP));
             } else {
-                actions.push(ACTION_START);
+                actions.push(_create_action_pair(ACTION_START));
+                if (logging_active) {
+                    actions.push(_create_action_pair(ACTION_START_AND_LOG));
+                }
             }
-        } else if (name == MANAGER_NAME) {
-            actions.push(ACTION_RESTART);
         }
     }
 
     return actions;
+}
+
+ApiExtensionInstaller.prototype.get_features = function() {
+    return features;
+}
+
+ApiExtensionInstaller.prototype.set_log_state = function(logging) {
+    if ((!logging_active && logging) || (logging_active && !logging)) {
+        // State changed
+        _restart(MANAGER_NAME);
+    }
 }
 
 ApiExtensionInstaller.prototype.perform_action = function(action, name) {
@@ -244,21 +323,28 @@ ApiExtensionInstaller.prototype.perform_action = function(action, name) {
             _queue_action(name, { action: ACTION_UNINSTALL });
             break;
         case ACTION_START:
-            _start(name);
+            _start(name, false);
+            break;
+        case ACTION_START_AND_LOG:
+            _start(name, true);
             break;
         case ACTION_RESTART:
-            if (name == MANAGER_NAME) {
-                ApiExtensionInstaller.prototype.restart_manager.call(this);
-            } else {
-                runner.restart(name, () => {
-                    _set_status("Restarted: " + name, false);
-                });
-            }
+            _restart(name, false);
+            break;
+        case ACTION_RESTART_AND_LOG:
+            _restart(name, true);
             break;
         case ACTION_STOP:
             _stop(name, true);
             break;
     }
+}
+
+function _create_action_pair(action) {
+    return {
+        title: action_strings[action],
+        value: action
+    };
 }
 
 function _check_prerequisites() {
@@ -280,7 +366,6 @@ function _check_prerequisites() {
 }
 
 function _load_repository() {
-    const fs = require('fs');
     let main_repo = extension_root + module_dir + REPOS_NAME + '/repository.json';
     let local_repos = extension_root + repos_dir;
     let values = [];
@@ -326,12 +411,9 @@ function _load_repository() {
 
 function _add_to_repository(file) {
     if (file.includes('.json')) {
-        const fs = require('fs');
-        const data = fs.readFileSync(file, 'utf8');
+        const new_repo = _read_JSON_file_sync(file);
 
-        if (data) {
-            let new_repo = JSON.parse(data);
-
+        if (new_repo) {
             for (let i = 0; i < new_repo.length; i++) {
                 const category = new_repo[i].display_name;
                 let j = 0;
@@ -414,7 +496,7 @@ function _register_version(name, update) {
                     _start(name);
                 }
             } else {
-                _start(name);
+                _start(name, false);
             }
 
             _query_updates(null, name);
@@ -453,7 +535,6 @@ function _update(name, cb) {
 }
 
 function _post_install(name, options, cb) {
-    const fs = require('fs');
     const npmignore = extension_root + module_dir + name + '/' + '.npmignore';
 
     fs.readFile(npmignore, 'utf8', (err, data) => {
@@ -481,8 +562,6 @@ function _post_install(name, options, cb) {
 }
 
 function _backup(name, options, cb) {
-    const fs = require('fs');
-
     fs.readFile(options.cwd + '.npmignore', 'utf8', (err, data) => {
         if (err) {
             // Working directory clean
@@ -542,7 +621,6 @@ function _download_gitignore(name, cb) {
 }
 
 function _create_archive(data, options, cb) {
-    const fs = require('fs');
     const tar = require('tar');
     const lines = data.split('\n');
     let globs = [];
@@ -592,16 +670,29 @@ function _unregister_version(name) {
     _remove_action(name);
 }
 
-function _start(name) {
+function _get_log_descriptor(name) {
+    const log_file = extension_root + log_dir + name + '.log';
+    let descriptor = logs_list[name];
+
+    // Get file descriptor if it hasn't been defined
+    if (descriptor == undefined) {
+        descriptor = fs.openSync(log_file, 'a');
+        logs_list[name] = descriptor;
+    }
+
+    return descriptor;
+}
+
+function _start(name, log) {
     const cwd = extension_root + module_dir + name;
     let inherit_mode = 'ignore';
 
-    if (name == MANAGER_NAME) {
-        // Pass the inherit mode to the new instance
-        inherit_mode = stdio_inherit_mode;
-    } else if (stdio_inherit_mode == 'inherit_all') {
-        // Let the child inherit stdio streams
-        inherit_mode = 'inherit';
+    if (log === undefined) {
+        log = (logging_active && logs_list[name] !== undefined);
+    }
+
+    if (log) {
+        inherit_mode = _get_log_descriptor(name);
     }
 
     runner.start(name, cwd, '.', inherit_mode, (code, signal, user) => {
@@ -612,23 +703,39 @@ function _start(name) {
         } else if (signal) {
             _set_status("Terminated: " + name + " (" + signal +")", false);
         }
+
+        // Close log file
+        if (logs_list[name]) {
+            fs.closeSync(logs_list[name]);
+            if (user) {
+                delete logs_list[name];
+            } else {
+                logs_list[name] = null;
+            }
+        }
     });
 
     if (name == MANAGER_NAME) {
-        process.exit();     // Let new instance take over
+        _terminate(0, log);   // Let new instance take over
+    } else if (log) {
+        _set_status("Started (with logging): " + name, false);
     } else {
         _set_status("Started: " + name, false);
     }
 }
 
-function _stop(name, user, cb) {
-    if (name == MANAGER_NAME) {
-        if (runner) {
-            runner.prepare_exit(cb);
-        } else if (cb) {
-            cb();
+function _restart(name, log) {
+    _stop(name, false, () => {
+        if (self_update || name != MANAGER_NAME) {
+            _start(name, log);
+        } else {
+            _terminate(perform_restart, log);
         }
-    } else if (name != REPOS_NAME) {
+    });
+}
+
+function _stop(name, user, cb) {
+    if (name != MANAGER_NAME && name != REPOS_NAME) {
         _set_status("Terminating: " + name + "...", false);
 
         if (user) {
@@ -641,8 +748,46 @@ function _stop(name, user, cb) {
     }
 }
 
+function _terminate(exit_code, log) {
+    if (logging_active) {
+        // Close log files
+        for (const name in logs_list) {
+            if (name == MANAGER_NAME) {
+                process.stdout.write = stdout_write;
+                process.stderr.write = stderr_write;
+
+                if (write_stream) {
+                    write_stream.end();
+                }
+            }
+        }
+
+        if (log !== undefined) {
+            // Logging specified
+            if (log && !logs_list[MANAGER_NAME]) {
+                // Switched on
+                logs_list[MANAGER_NAME] = null;
+            } else if (!log && logs_list[MANAGER_NAME]) {
+                // Switched off
+                delete logs_list[MANAGER_NAME];
+            }
+        }
+
+        // Write names of logging extensions to file
+        fs.writeFileSync('logging.json', JSON.stringify(Object.keys(logs_list)));
+    }
+
+    runner.prepare_exit(() => {
+        if (exit_code) {
+            process.exit(exit_code);
+        } else {
+            process.exit(0);
+        }
+    });
+}
+
 function _exit_for_update() {
-    process.exit(perform_update);
+    _terminate(perform_update);
 }
 
 function _queue_action(name, action_props) {
@@ -739,10 +884,6 @@ function _query_installs(cb, name) {
             if (cb) {
                 cb(installed);
             }
-            // User callback
-            if (installs_cb) {
-                installs_cb(installed);
-            }
         }
     });
 }
@@ -809,6 +950,21 @@ function _set_status(message, is_error) {
     if (status_cb) {
         status_cb(message, is_error);
     }
+}
+
+function _read_JSON_file_sync(file) {
+    let parsed = undefined;
+
+    try {
+        let data = fs.readFileSync(file, 'utf8');
+        parsed = JSON.parse(data);
+    } catch (err) {
+        if (err.code !== 'ENOENT') {
+            throw err;
+        }
+    }
+
+    return parsed;
 }
 
 exports = module.exports = ApiExtensionInstaller;
