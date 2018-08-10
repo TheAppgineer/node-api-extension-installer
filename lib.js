@@ -370,6 +370,8 @@ function _load_repository() {
     let local_repos = extension_root + repos_dir;
     let values = [];
 
+    repos.length = 0;       // Cleanup first
+
     repos.push(repos_system);
     _add_to_repository(main_repo);
 
