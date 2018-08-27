@@ -108,6 +108,7 @@ var status_cb;
 function ApiExtensionInstaller(callbacks, logging, self_control) {
     process.on('SIGTERM', _terminate);
     process.on('SIGINT', _terminate);
+    process.on('SIGBREAK', _terminate);
 
     if (callbacks) {
         if (callbacks.repository_changed) {
@@ -127,7 +128,7 @@ function ApiExtensionInstaller(callbacks, logging, self_control) {
     self_update = self_control;
 
     if (_check_prerequisites()) {
-        _query_installs((installed) => {
+        _query_installs(() => {
             const mkdirp = require('mkdirp');
 
             features = _read_JSON_file_sync(extension_root + 'features.json');
@@ -186,7 +187,9 @@ function ApiExtensionInstaller(callbacks, logging, self_control) {
                     runner = new ApiExtensionRunner(MANAGER_NAME, (running) => {
                         // Start previously running extensions
                         for (let i = 0; i < running.length; i++) {
-                            _start(running[i], logs_array.includes(running[i]));
+                            if (installed[running[i]]) {
+                                _start(running[i], logs_array.includes(running[i]));
+                            }
                         }
                     });
 
@@ -486,7 +489,7 @@ function _register_updated_version(name) {
 }
 
 function _register_version(name, update) {
-    _query_installs((installed) => {
+    _query_installs(() => {
         const version = installed[name];
         _set_status((update ? "Updated: " : "Installed: ") + name + " (" + version + ")", false);
 
@@ -701,7 +704,9 @@ function _start(name, log) {
         if (user) {
             _set_status("Stopped: " + name, false);
         } else if (code !== null) {
-            _set_status("Terminated: " + name + " (" + code +")", code);
+            const WINDOWS_USER_BREAK = 3221225786;
+
+            _set_status("Terminated: " + name + " (" + code +")", code && code != WINDOWS_USER_BREAK);
         } else if (signal) {
             _set_status("Terminated: " + name + " (" + signal +")", false);
         }
@@ -737,7 +742,7 @@ function _restart(name, log) {
 }
 
 function _stop(name, user, cb) {
-    if (name != MANAGER_NAME && name != REPOS_NAME) {
+    if (runner.get_status(name) == 'running' && name != MANAGER_NAME) {
         _set_status("Terminating: " + name + "...", false);
 
         if (user) {
@@ -779,13 +784,17 @@ function _terminate(exit_code, log) {
         fs.writeFileSync('logging.json', JSON.stringify(Object.keys(logs_list)));
     }
 
-    runner.prepare_exit(() => {
-        if (exit_code) {
-            process.exit(exit_code);
-        } else {
-            process.exit(0);
-        }
-    });
+    if (runner) {
+        runner.prepare_exit(() => {
+            if (exit_code) {
+                process.exit(exit_code);
+            } else {
+                process.exit(0);
+            }
+        });
+    } else {
+        process.exit(1);
+    }
 }
 
 function _exit_for_update() {
@@ -882,9 +891,8 @@ function _query_installs(cb, name) {
                 }
             }
 
-            // Internal callback
             if (cb) {
-                cb(installed);
+                cb();
             }
         }
     });
