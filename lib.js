@@ -87,7 +87,7 @@ const fs = require('fs');
 var ApiExtensionRunner = require('node-api-extension-runner');
 
 var write_stream;
-var runner;
+var runner = undefined;
 var extension_root;
 var features = {};
 var repos = [];
@@ -98,14 +98,13 @@ var action_queue = {};
 var logging_active = false;
 var logs_list = {};
 var self_update_pending = false;
-var self_update;
 
 var repository_cb;
 var installs_cb;
 var updates_cb;
 var status_cb;
 
-function ApiExtensionInstaller(callbacks, logging, self_control) {
+function ApiExtensionInstaller(callbacks, logging, use_runner) {
     process.on('SIGTERM', _terminate);
     process.on('SIGINT', _terminate);
     process.on('SIGBREAK', _terminate);
@@ -124,8 +123,6 @@ function ApiExtensionInstaller(callbacks, logging, self_control) {
             status_cb = callbacks.status_changed;
         }
     }
-
-    self_update = self_control;
 
     if (_check_prerequisites()) {
         _query_installs(() => {
@@ -166,8 +163,6 @@ function ApiExtensionInstaller(callbacks, logging, self_control) {
                         logging_active = logging;
                     }
 
-                    _set_status("Roon Extension Manager started!", false);
-
                     // Create backup directory, used during update
                     mkdirp(extension_root + backup_dir, (err, made) => {
                         if (err) {
@@ -184,14 +179,18 @@ function ApiExtensionInstaller(callbacks, logging, self_control) {
                         _load_repository();
                     }
 
-                    runner = new ApiExtensionRunner(MANAGER_NAME, (running) => {
-                        // Start previously running extensions
-                        for (let i = 0; i < running.length; i++) {
-                            if (installed[running[i]]) {
-                                _start(running[i], logs_array.includes(running[i]));
+                    if (use_runner) {
+                        runner = new ApiExtensionRunner(MANAGER_NAME, (running) => {
+                            // Start previously running extensions
+                            for (let i = 0; i < running.length; i++) {
+                                if (installed[running[i]]) {
+                                    _start(running[i], logs_array.includes(running[i]));
+                                }
                             }
-                        }
-                    });
+                        });
+
+                        _set_status("Roon Extension Manager started!", false);
+                    }
 
                     // User callback
                     if (installs_cb) {
@@ -224,6 +223,10 @@ ApiExtensionInstaller.prototype.get_extensions_by_category = function(category_i
     values.sort(_compare);
 
     return values;
+}
+
+ApiExtensionInstaller.prototype.update = function(name) {
+    ApiExtensionInstaller.prototype.perform_action.call(this, ACTION_UPDATE, name);
 }
 
 ApiExtensionInstaller.prototype.update_all = function() {
@@ -399,6 +402,7 @@ function _load_repository() {
             _set_status("Extension Repository loaded", false);
 
             if (installed[MANAGER_NAME]) {
+                // Make sure post install actions have been performed
                 _post_install(MANAGER_NAME);
             }
 
@@ -513,7 +517,9 @@ function _register_version(name, update) {
 
 function _update(name, cb) {
     if (name) {
-        if (self_update || name != MANAGER_NAME) {
+        if (runner && name == MANAGER_NAME) {
+            _stop(name, false, _exit_for_update);
+        } else {
             _stop(name, false, () => {
                 const cwd = extension_root + module_dir + name + '/';
                 const backup_file = extension_root + backup_dir + name + '.tar';
@@ -533,8 +539,6 @@ function _update(name, cb) {
                     });
                 });
             });
-        } else {
-            _stop(name, false, _exit_for_update);
         }
     }
 }
@@ -605,7 +609,18 @@ function _download_gitignore(name, cb) {
     if (git && git.includes('github')) {
         const https = require('https');
         const parts = git.split('#');
-        const branch = (parts.length > 1 ? parts[1] : 'master');
+        let branch = 'master';
+
+        if (parts.length > 1) {
+            branch = parts[1];
+        } else if (name == MANAGER_NAME) {
+            // Get committisch from package.json
+            const package_json = _read_JSON_file_sync(extension_root + module_dir + name + '/package.json');
+
+            if (package_json && package_json._requested && package_json._requested.gitCommittish) {
+                branch = package_json._requested.gitCommittish;
+            }
+        }
 
         let url = parts[0].replace('.git', '/' + branch + '/.gitignore');
         url = url.replace('github', 'raw.githubusercontent');
@@ -722,9 +737,7 @@ function _start(name, log) {
         }
     });
 
-    if (name == MANAGER_NAME) {
-        _terminate(0, log);   // Let new instance take over
-    } else if (log) {
+    if (log) {
         _set_status("Started (with logging): " + name, false);
     } else {
         _set_status("Started: " + name, false);
@@ -733,16 +746,16 @@ function _start(name, log) {
 
 function _restart(name, log) {
     _stop(name, false, () => {
-        if (self_update || name != MANAGER_NAME) {
-            _start(name, log);
-        } else {
+        if (runner && name == MANAGER_NAME) {
             _terminate(perform_restart, log);
+        } else {
+            _start(name, log);
         }
     });
 }
 
 function _stop(name, user, cb) {
-    if (runner.get_status(name) == 'running' && name != MANAGER_NAME) {
+    if (runner && runner.get_status(name) == 'running' && name != MANAGER_NAME) {
         _set_status("Terminating: " + name + "...", false);
 
         if (user) {
@@ -827,8 +840,7 @@ function _perform_action() {
                 break;
             case ACTION_UPDATE:
                 if (name == MANAGER_NAME) {
-                    // TODO: Add support for update only case
-                    _update(name, _start);
+                    _update(name);
                 } else {
                     _update(name, _register_updated_version);
                 }
@@ -852,7 +864,7 @@ function _queue_updates(updates) {
 
         if (self_update_pending) {
             // Perform manager actions last
-            if (updates_list[UPDATER_NAME]) {
+            if (runner && updates_list[UPDATER_NAME]) {
                 _queue_action(UPDATER_NAME, { action: ACTION_UPDATE });
             }
             _queue_action(MANAGER_NAME, { action: ACTION_UPDATE });
