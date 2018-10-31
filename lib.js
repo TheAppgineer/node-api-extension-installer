@@ -709,6 +709,8 @@ function _start(name, log) {
 
     if (log === undefined) {
         log = (logging_active && logs_list[name] !== undefined);
+    } else if (log === false && logs_list[name] === null) {
+        delete logs_list[name];     // Logging explicitly got deactivated
     }
 
     if (log) {
