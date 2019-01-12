@@ -80,6 +80,7 @@ const module_dir = 'node_modules/';
 const backup_dir = 'backup/';
 const repos_dir = 'repos/';
 const log_dir = 'log/';
+const binds_dir = 'binds/';
 const perform_update = 66;
 const perform_restart = 67;
 
@@ -95,6 +96,7 @@ var features = {};
 var repos = [];
 var index_cache = {};
 var npm_installed = {};
+var npm_preferred = false;
 var docker_installed;
 var updates_list = {};
 var action_queue = {};
@@ -263,7 +265,7 @@ ApiExtensionInstaller.prototype.get_status = function(name) {
 ApiExtensionInstaller.prototype.get_details = function(name) {
     const index_pair = _get_index_pair(name);
     const extension = repos[index_pair[0]].extensions[index_pair[1]];
-    
+
     return {
         author:       extension.author,
         display_name: extension.display_name,
@@ -274,9 +276,17 @@ ApiExtensionInstaller.prototype.get_details = function(name) {
 ApiExtensionInstaller.prototype.get_actions = function(name) {
     const state = ApiExtensionInstaller.prototype.get_status.call(this, name).state;
     let actions = [];
+    let options;
 
     if (state == 'not_installed') {
+        const index_pair = _get_index_pair(name);
+        const extension = repos[index_pair[0]].extensions[index_pair[1]];
+
         actions.push(_create_action_pair(ACTION_INSTALL));
+
+        if (!npm_preferred || !extension.repository) {
+            options = docker.get_install_options(extension.image);
+        }
     } else {
         if (updates_list[name]) {
             actions.push(_create_action_pair(ACTION_UPDATE));
@@ -305,7 +315,10 @@ ApiExtensionInstaller.prototype.get_actions = function(name) {
         }
     }
 
-    return actions;
+    return {
+        actions: actions,
+        options: options
+    };
 }
 
 ApiExtensionInstaller.prototype.get_features = function() {
@@ -319,10 +332,10 @@ ApiExtensionInstaller.prototype.set_log_state = function(logging) {
     }
 }
 
-ApiExtensionInstaller.prototype.perform_action = function(action, name) {
+ApiExtensionInstaller.prototype.perform_action = function(action, name, options) {
     switch (action) {
         case ACTION_INSTALL:
-            _queue_action(name, { action: ACTION_INSTALL });
+            _queue_action(name, { action: ACTION_INSTALL, options: options });
             break;
         case ACTION_UPDATE:
             _query_updates(_queue_updates, name);
@@ -386,6 +399,7 @@ function _load_repository() {
     docker = new ApiExtensionInstallerDocker((err, installed) => {
         if (err) {
             console.warn(err);
+            npm_preferred = true;
         } else {
             console.log('Docker for Linux found: Version', docker.get_status().version);
 
@@ -402,7 +416,7 @@ function _load_repository() {
             if (repos.length) {
                 if (installed) {
                     docker_installed = {};
-                    
+
                     for (const name in installed) {
                         // Only images that are included in the repository
                         if (name != MANAGER_NAME && _get_index_pair(name)) {
@@ -485,7 +499,7 @@ function _get_name(extension) {
 
         if (substrings && substrings[0] == 'https') {
             substrings = substrings[1].split('.');
-            
+
             if (substrings[2].indexOf('git') === 0) {
                 substrings = substrings[1].split('/');
                 name = substrings[2];
@@ -500,7 +514,7 @@ function _get_name(extension) {
 
 function _get_index_pair(name) {
     let index_pair = index_cache[name];
-    
+
     if (!index_pair) {
         for (let i = 0; i < repos.length; i++) {
             const extensions = repos[i].extensions;
@@ -521,30 +535,33 @@ function _get_index_pair(name) {
     return index_pair;
 }
 
-function _install(name, cb) {
+function _install(name, options, cb) {
     if (name) {
         const index_pair = _get_index_pair(name);
         const extension = repos[index_pair[0]].extensions[index_pair[1]];
 
         _set_status("Installing: " + name + "...", false);
 
-        if (extension.repository) {
+        if ((npm_preferred && extension.repository && extension.image) ||   // Both available, npm preferred
+                (extension.repository && !extension.image)) {               // Only npm available
             // npm.install()
-            const git = extension.repository.url;
             const exec = require('child_process').exec;
 
-            exec('npm install -g ' + git, (err, stdout, stderr) => {
+            exec('npm install -g ' + extension.repository.url, (err, stdout, stderr) => {
                 if (err) {
                     _set_status("Installation failed: " + name, true);
                     console.error(stderr);
-                    
+
                     cb && cb(name);
                 } else {
                     _post_install(name, undefined, cb);
                 }
             });
-        } else if (extension.image) {
-            docker.install(extension.image, (err, tag) => {
+        } else if (extension.image) {                                       // Docker available
+            // Create binds directory
+            const binds_path = extension_root + binds_dir + name;
+
+            docker.install(extension.image, binds_path, options, (err, tag) => {
                 if (err) {
                     _set_status("Installation failed: " + name, true);
                     console.error(err);
@@ -953,7 +970,7 @@ function _perform_action() {
 
         switch (action_queue[name].action) {
             case ACTION_INSTALL:
-                _install(name, _register_installed_version);
+                _install(name, action_queue[name].options, _register_installed_version);
                 break;
             case ACTION_UPDATE:
                 if (name == MANAGER_NAME) {
