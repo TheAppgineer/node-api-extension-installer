@@ -268,6 +268,7 @@ ApiExtensionInstaller.prototype.get_details = function(name) {
 
     return {
         author:       extension.author,
+        packager:     extension.packager,
         display_name: extension.display_name,
         description:  extension.description
     };
@@ -558,10 +559,7 @@ function _install(name, options, cb) {
                 }
             });
         } else if (extension.image) {                                       // Docker available
-            // Create binds directory
-            const binds_path = extension_root + binds_dir + name;
-
-            docker.install(extension.image, binds_path, options, (err, tag) => {
+            docker.install(extension.image, extension_root + binds_dir + name, options, (err, tag) => {
                 if (err) {
                     _set_status("Installation failed: " + name, true);
                     console.error(err);
