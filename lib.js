@@ -96,8 +96,8 @@ var features = {};
 var repos = [];
 var index_cache = {};
 var npm_installed = {};
-var npm_preferred = false;
-var docker_installed;
+var npm_preferred = true;
+var docker_installed = {};
 var updates_list = {};
 var action_queue = {};
 var logging_active = false;
@@ -388,34 +388,40 @@ function _check_prerequisites() {
 }
 
 function _load_repository() {
-    const main_repo_path = extension_root + module_dir + REPOS_NAME;
+    const main_repo = extension_root + module_dir + REPOS_NAME + '/repository.json';
     const local_repos = extension_root + repos_dir;
     let values = [];
 
     repos.length = 0;       // Cleanup first
 
     repos.push(repos_system);
-    _add_to_repository(main_repo_path + '/repository.json');
 
     docker = new ApiExtensionInstallerDocker((err, installed) => {
+        let npm_install_active    = (!features || features.npm_install    != 'off');
+        let docker_install_active = (!features || features.docker_install != 'off');
+
         if (err) {
             console.warn(err);
+            
             npm_preferred = true;
+            docker_install_active = false;
         } else {
             console.log('Docker for Linux found: Version', docker.get_status().version);
-
-            _add_to_repository(main_repo_path + '/docker-repository.json');
+            
+            npm_preferred = (!features || features.docker_install != 'prio');
         }
+
+        _add_to_repository(main_repo, npm_install_active, docker_install_active);
 
         fs.readdir(local_repos, (err, files) => {
             if (!err) {
                 for(let i = 0; i < files.length; i++) {
-                    _add_to_repository(local_repos + files[i]);
+                    _add_to_repository(local_repos + files[i], npm_install_active, docker_install_active);
                 };
             }
 
             if (repos.length) {
-                if (installed) {
+                if (installed && docker_install_active) {
                     docker_installed = {};
 
                     for (const name in installed) {
@@ -457,24 +463,41 @@ function _load_repository() {
     });
 }
 
-function _add_to_repository(file) {
+function _add_to_repository(file, npm_install_active, docker_install_active) {
     if (file.includes('.json')) {
         const new_repo = _read_JSON_file_sync(file);
 
         if (new_repo) {
             for (let i = 0; i < new_repo.length; i++) {
-                const category = new_repo[i].display_name;
-                let j = 0;
+                let filtered = {
+                    display_name: new_repo[i].display_name,
+                    extensions: []
+                };
+                let j;
 
-                for (; j < repos.length; j++) {
-                    if (repos[j].display_name == category) {
-                        repos[j].extensions = repos[j].extensions.concat(new_repo[i].extensions);
+                // Is the install type available and active?
+                for (j = 0; j < new_repo[i].extensions.length; j++) {
+                    if ((new_repo[i].extensions[j].repository && npm_install_active) ||
+                            (new_repo[i].extensions[j].image && docker_install_active)) {
+                        filtered.extensions.push(new_repo[i].extensions[j]);
+                    }
+                }
+                
+                // Does category already exist?
+                for (j = 0; j < repos.length; j++) {
+                    if (repos[j].display_name == filtered.display_name) {
                         break;
                     }
                 }
 
-                if (j === repos.length) {
-                    repos.push(new_repo[i]);
+                if (filtered.extensions.length) {
+                    if (j === repos.length) {
+                        // New category
+                        repos.push(filtered);
+                    } else {
+                        // Add to existing category
+                        repos[j].extensions = repos[j].extensions.concat(filtered.extensions);
+                    }
                 }
             }
         }
@@ -1049,7 +1072,7 @@ function _query_installs(cb, name) {
 function _query_updates(cb, name) {
     let results = {};
 
-    if (docker_installed) {
+    if (Object.keys(docker_installed).length) {
         docker.query_updates((updates) => {
             for (const name in updates) {
                 // Only images that are included in the repository
