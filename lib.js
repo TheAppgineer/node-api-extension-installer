@@ -98,6 +98,7 @@ var index_cache = {};
 var npm_installed = {};
 var npm_preferred = true;
 var docker_installed = {};
+var containerized;
 var updates_list = {};
 var action_queue = {};
 var logging_active = false;
@@ -421,16 +422,8 @@ function _load_repository() {
             }
 
             if (repos.length) {
-                if (installed && docker_install_active) {
-                    docker_installed = {};
-
-                    for (const name in installed) {
-                        // Only images that are included in the repository
-                        if (name != MANAGER_NAME && _get_index_pair(name)) {
-                            docker_installed[name] = installed[name];
-                        }
-                    }
-                    console.log(docker_installed);
+                if (docker_install_active) {
+                    docker_installed = _get_docker_installed_extensions(installed);
                 }
 
                 // Collect extension categories
@@ -502,6 +495,27 @@ function _add_to_repository(file, npm_install_active, docker_install_active) {
             }
         }
     }
+}
+
+function _get_docker_installed_extensions(installed) {
+    let installed_extensions = {};
+
+    if (installed) {
+        for (const name in installed) {
+            // Only images that are included in the repository
+            if (_get_index_pair(name)) {
+                if (name == MANAGER_NAME) {
+                    // Looks like we're running in a container
+                    containerized = true;
+                } else {
+                    installed_extensions[name] = installed[name];
+                }
+            }
+        }
+        console.log(installed_extensions);
+    }
+    
+    return installed_extensions;
 }
 
 function _compare(a, b) {
@@ -582,7 +596,13 @@ function _install(name, options, cb) {
                 }
             });
         } else if (extension.image) {                                       // Docker available
-            docker.install(extension.image, extension_root + binds_dir + name, options, (err, tag) => {
+            const bind_props = {
+                root:       extension_root,
+                binds_path: binds_dir + name,
+                name:       (containerized ? MANAGER_NAME : undefined)
+            };
+            
+            docker.install(extension.image, bind_props, options, (err, tag) => {
                 if (err) {
                     _set_status("Installation failed: " + name, true);
                     console.error(err);
@@ -796,7 +816,7 @@ function _uninstall(name, cb) {
                         _set_status("Uninstall failed: " + name, true);
                         console.error(err);
                     } else {
-                        docker_installed = installed;
+                        docker_installed = _get_docker_installed_extensions(installed);
                     }
 
                     cb && cb(name);
