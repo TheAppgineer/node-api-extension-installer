@@ -143,7 +143,8 @@ function ApiExtensionInstaller(callbacks, logging, use_runner) {
                             logs_array = _read_JSON_file_sync('logging.json');
                             if (logs_array === undefined) logs_array = [];
 
-                            if (logs_array && logs_array.includes(MANAGER_NAME)) {
+                            if (logs_array && logs_array.includes(MANAGER_NAME) &&
+                                    (!features || features.log_mode != 'child_nodes')) {
                                 // Start logging of manager stdout
                                 const fd = _get_log_descriptor(MANAGER_NAME);
                                 write_stream = fs.createWriteStream('', {flags: 'a', fd: fd});
@@ -296,7 +297,7 @@ ApiExtensionInstaller.prototype.get_actions = function(name) {
 
         if (name == MANAGER_NAME) {
             actions.push(_create_action_pair(ACTION_RESTART));
-            if (logging_active) {
+            if (logging_active && (!features || features.log_mode != 'child_nodes')) {
                 actions.push(_create_action_pair(ACTION_RESTART_AND_LOG));
             }
         } else if (repos[_get_index_pair(name)[0]].display_name != SYSTEM_NAME) {
