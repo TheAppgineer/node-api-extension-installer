@@ -92,7 +92,7 @@ var write_stream;
 var runner = undefined;
 var docker = undefined;
 var extension_root;
-var features = {};
+var features;
 var repos = [];
 var index_cache = {};
 var npm_installed = {};
@@ -109,7 +109,7 @@ var session_error;
 var repository_cb;
 var status_cb;
 
-function ApiExtensionInstaller(callbacks, logging, use_runner) {
+function ApiExtensionInstaller(callbacks, logging, use_runner, features_file) {
     process.on('SIGTERM', _terminate);
     process.on('SIGINT', _terminate);
     process.on('SIGBREAK', _terminate);
@@ -127,7 +127,13 @@ function ApiExtensionInstaller(callbacks, logging, use_runner) {
         _query_installs(() => {
             const mkdirp = require('mkdirp');
 
-            features = _read_JSON_file_sync(extension_root + 'features.json');
+            if (features_file) {
+                features = _read_JSON_file_sync(features_file);
+            }
+            
+            if (!features) {
+                features = _read_JSON_file_sync(extension_root + 'features.json');
+            }
 
             // Create log directory
             mkdirp(extension_root + log_dir, (err, made) => {
