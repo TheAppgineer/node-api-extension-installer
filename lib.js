@@ -22,6 +22,7 @@ const MANAGER_NAME = "roon-extension-manager";
 const REPOS_NAME = 'roon-extension-repository';
 
 const REPOS_GIT = "https://github.com/TheAppgineer/roon-extension-repository.git";
+const REPOS_INDEX = 2;
 
 const MIN_REPOS_VERSION = "0.2.0"
 
@@ -582,8 +583,16 @@ function _get_index_pair(name) {
 
 function _install(name, options, cb) {
     if (name) {
-        const index_pair = _get_index_pair(name);
-        const extension = repos[index_pair[0]].extensions[index_pair[1]];
+        let extension;
+
+        if (name == REPOS_NAME) {
+            // Repository not installed yet, access system repo directly
+            extension = repos_system.extensions[REPOS_INDEX];
+        } else {
+            const index_pair = _get_index_pair(name);
+
+            extension = repos[index_pair[0]].extensions[index_pair[1]];
+        }
 
         _set_status("Installing: " + name + "...", false);
 
