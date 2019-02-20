@@ -1,4 +1,4 @@
-// Copyright 2017, 2018 The Appgineer
+// Copyright 2017, 2018, 2019 The Appgineer
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -80,31 +80,36 @@ const module_dir = 'node_modules/';
 const backup_dir = 'backup/';
 const repos_dir = 'repos/';
 const log_dir = 'log/';
+const binds_dir = 'binds/';
 const perform_update = 66;
 const perform_restart = 67;
 
 const fs = require('fs');
 var ApiExtensionRunner = require('node-api-extension-runner');
+var ApiExtensionInstallerDocker = require('node-api-extension-installer-docker');
 
 var write_stream;
 var runner = undefined;
+var docker = undefined;
 var extension_root;
-var features = {};
+var features;
 var repos = [];
 var index_cache = {};
-var installed = {};
+var npm_installed = {};
+var npm_preferred = true;
+var docker_installed = {};
+var containerized;
 var updates_list = {};
 var action_queue = {};
 var logging_active = false;
 var logs_list = {};
 var self_update_pending = false;
+var session_error;
 
 var repository_cb;
-var installs_cb;
-var updates_cb;
 var status_cb;
 
-function ApiExtensionInstaller(callbacks, logging, use_runner) {
+function ApiExtensionInstaller(callbacks, logging, use_runner, features_file) {
     process.on('SIGTERM', _terminate);
     process.on('SIGINT', _terminate);
     process.on('SIGBREAK', _terminate);
@@ -112,12 +117,6 @@ function ApiExtensionInstaller(callbacks, logging, use_runner) {
     if (callbacks) {
         if (callbacks.repository_changed) {
             repository_cb = callbacks.repository_changed;
-        }
-        if (callbacks.installs_changed) {
-            installs_cb = callbacks.installs_changed;
-        }
-        if (callbacks.updates_changed) {
-            updates_cb = callbacks.updates_changed;
         }
         if (callbacks.status_changed) {
             status_cb = callbacks.status_changed;
@@ -128,7 +127,13 @@ function ApiExtensionInstaller(callbacks, logging, use_runner) {
         _query_installs(() => {
             const mkdirp = require('mkdirp');
 
-            features = _read_JSON_file_sync(extension_root + 'features.json');
+            if (features_file) {
+                features = _read_JSON_file_sync(features_file);
+            }
+            
+            if (!features) {
+                features = _read_JSON_file_sync(extension_root + 'features.json');
+            }
 
             // Create log directory
             mkdirp(extension_root + log_dir, (err, made) => {
@@ -144,7 +149,8 @@ function ApiExtensionInstaller(callbacks, logging, use_runner) {
                             logs_array = _read_JSON_file_sync('logging.json');
                             if (logs_array === undefined) logs_array = [];
 
-                            if (logs_array && logs_array.includes(MANAGER_NAME)) {
+                            if (logs_array && logs_array.includes(MANAGER_NAME) &&
+                                    (!features || features.log_mode != 'child_nodes')) {
                                 // Start logging of manager stdout
                                 const fd = _get_log_descriptor(MANAGER_NAME);
                                 write_stream = fs.createWriteStream('', {flags: 'a', fd: fd});
@@ -170,10 +176,10 @@ function ApiExtensionInstaller(callbacks, logging, use_runner) {
                         }
                     });
 
-                    if (!installed[REPOS_NAME]) {
+                    if (!npm_installed[REPOS_NAME]) {
                         // Install extension repository
                         _queue_action(REPOS_NAME, { action: ACTION_INSTALL, url: REPOS_GIT });
-                    } else if ( installed[REPOS_NAME] < MIN_REPOS_VERSION) {
+                    } else if ( npm_installed[REPOS_NAME] < MIN_REPOS_VERSION) {
                         _queue_action(REPOS_NAME, { action: ACTION_UPDATE });
                     } else {
                         _load_repository();
@@ -183,7 +189,7 @@ function ApiExtensionInstaller(callbacks, logging, use_runner) {
                         runner = new ApiExtensionRunner(MANAGER_NAME, (running) => {
                             // Start previously running extensions
                             for (let i = 0; i < running.length; i++) {
-                                if (installed[running[i]]) {
+                                if (npm_installed[running[i]]) {
                                     _start(running[i], logs_array.includes(running[i]));
                                 }
                             }
@@ -192,10 +198,7 @@ function ApiExtensionInstaller(callbacks, logging, use_runner) {
                         _set_status("Roon Extension Manager started!", false);
                     }
 
-                    // User callback
-                    if (installs_cb) {
-                        installs_cb(installed);
-                    }
+                    console.log(npm_installed);
                 }
             });
         });
@@ -209,14 +212,15 @@ ApiExtensionInstaller.prototype.get_extensions_by_category = function(category_i
     // Collect extensions
     for (let i = 0; i < extensions.length; i++) {
         if (extensions[i].display_name) {
-            const name = _get_name_from_url(extensions[i].repository.url);
+            const name = _get_name(extensions[i]);
 
             values.push({
                 title: extensions[i].display_name,
                 value: name
             });
 
-            index_cache[name] = '' + category_index + ':' + i;
+            // Take the opportunity to cache the item
+            index_cache[name] = [category_index, i];
         }
     }
 
@@ -246,32 +250,52 @@ ApiExtensionInstaller.prototype.restart_manager = function() {
  * @returns {('not_installed'|'installed'|'stopped'|'terminated'|'running')} - The status of the extension
  */
 ApiExtensionInstaller.prototype.get_status = function(name) {
-    const version = installed[name];
-    let state = (version ? 'installed' : 'not_installed');
+    if (docker_installed[name]) {
+        return docker.get_status(name);
+    } else {
+        // npm.get_status(name)
+        const version = npm_installed[name];
 
-    if (state == 'installed' && name != REPOS_NAME) {
-        state = runner.get_status(name);
+        let state = (version ? 'installed' : 'not_installed');
+
+        if (state == 'installed' && name != REPOS_NAME) {
+            state = runner.get_status(name);
+        }
+
+        return {
+            state:   state,
+            version: version,
+            logging: (logs_list[name] !== undefined)
+        };
     }
-
-    return {
-        state:   state,
-        version: version,
-        logging: (logs_list[name] !== undefined)
-    };
 }
 
 ApiExtensionInstaller.prototype.get_details = function(name) {
-    const index_pair = index_cache[name].split(':');
+    const index_pair = _get_index_pair(name);
+    const extension = repos[index_pair[0]].extensions[index_pair[1]];
 
-    return repos[index_pair[0]].extensions[index_pair[1]];
+    return {
+        author:       extension.author,
+        packager:     extension.packager,
+        display_name: extension.display_name,
+        description:  extension.description
+    };
 }
 
 ApiExtensionInstaller.prototype.get_actions = function(name) {
     const state = ApiExtensionInstaller.prototype.get_status.call(this, name).state;
     let actions = [];
+    let options;
 
     if (state == 'not_installed') {
+        const index_pair = _get_index_pair(name);
+        const extension = repos[index_pair[0]].extensions[index_pair[1]];
+
         actions.push(_create_action_pair(ACTION_INSTALL));
+
+        if (!npm_preferred || !extension.repository) {
+            options = docker.get_install_options(extension.image);
+        }
     } else {
         if (updates_list[name]) {
             actions.push(_create_action_pair(ACTION_UPDATE));
@@ -279,28 +303,31 @@ ApiExtensionInstaller.prototype.get_actions = function(name) {
 
         if (name == MANAGER_NAME) {
             actions.push(_create_action_pair(ACTION_RESTART));
-            if (logging_active) {
+            if (logging_active && (!features || features.log_mode != 'child_nodes')) {
                 actions.push(_create_action_pair(ACTION_RESTART_AND_LOG));
             }
-        } else if (repos[index_cache[name].split(':')[0]].display_name != SYSTEM_NAME) {
+        } else if (repos[_get_index_pair(name)[0]].display_name != SYSTEM_NAME) {
             actions.push(_create_action_pair(ACTION_UNINSTALL));
 
             if (state == 'running') {
                 actions.push(_create_action_pair(ACTION_RESTART));
-                if (logging_active) {
+                if (logging_active && npm_installed[name]) {
                     actions.push(_create_action_pair(ACTION_RESTART_AND_LOG));
                 }
                 actions.push(_create_action_pair(ACTION_STOP));
             } else {
                 actions.push(_create_action_pair(ACTION_START));
-                if (logging_active) {
+                if (logging_active && npm_installed[name]) {
                     actions.push(_create_action_pair(ACTION_START_AND_LOG));
                 }
             }
         }
     }
 
-    return actions;
+    return {
+        actions: actions,
+        options: options
+    };
 }
 
 ApiExtensionInstaller.prototype.get_features = function() {
@@ -314,13 +341,10 @@ ApiExtensionInstaller.prototype.set_log_state = function(logging) {
     }
 }
 
-ApiExtensionInstaller.prototype.perform_action = function(action, name) {
+ApiExtensionInstaller.prototype.perform_action = function(action, name, options) {
     switch (action) {
         case ACTION_INSTALL:
-            const index_pair = index_cache[name].split(':');
-            const url = repos[index_pair[0]].extensions[index_pair[1]].repository.url;
-
-            _queue_action(name, { action: ACTION_INSTALL, url: url });
+            _queue_action(name, { action: ACTION_INSTALL, options: options });
             break;
         case ACTION_UPDATE:
             _query_updates(_queue_updates, name);
@@ -372,74 +396,133 @@ function _check_prerequisites() {
 }
 
 function _load_repository() {
-    let main_repo = extension_root + module_dir + REPOS_NAME + '/repository.json';
-    let local_repos = extension_root + repos_dir;
+    const main_repo = extension_root + module_dir + REPOS_NAME + '/repository.json';
+    const local_repos = extension_root + repos_dir;
     let values = [];
 
     repos.length = 0;       // Cleanup first
 
     repos.push(repos_system);
-    _add_to_repository(main_repo);
 
-    fs.readdir(local_repos, (err, files) => {
-        if (!err) {
-            for(let i = 0; i < files.length; i++) {
-                _add_to_repository(local_repos + files[i]);
-            };
-        }
+    docker = new ApiExtensionInstallerDocker((err, installed) => {
+        let npm_install_active    = (!features || features.npm_install    != 'off');
+        let docker_install_active = (!features || features.docker_install != 'off');
 
-        if (repos.length) {
-            // Collect extension categories
-            for (let i = 0; i < repos.length; i++) {
-                if (repos[i].display_name) {
-                    values.push({
-                        title: repos[i].display_name,
-                        value: i
-                    });
-                }
-            }
-
-            _set_status("Extension Repository loaded", false);
-
-            if (installed[MANAGER_NAME]) {
-                // Make sure post install actions have been performed
-                _post_install(MANAGER_NAME);
-            }
-
-            _query_updates();
+        if (err) {
+            console.warn(err);
+            
+            npm_preferred = true;
+            docker_install_active = false;
         } else {
-            _set_status("Extension Repository not found", true);
+            console.log('Docker for Linux found: Version', docker.get_status().version);
+            
+            npm_preferred = (!features || features.docker_install != 'prio');
         }
 
-        // User callback
-        if (repository_cb) {
-            repository_cb(values);
-        }
+        _add_to_repository(main_repo, npm_install_active, docker_install_active);
+
+        fs.readdir(local_repos, (err, files) => {
+            if (!err) {
+                for(let i = 0; i < files.length; i++) {
+                    _add_to_repository(local_repos + files[i], npm_install_active, docker_install_active);
+                };
+            }
+
+            if (repos.length) {
+                if (docker_install_active) {
+                    docker_installed = _get_docker_installed_extensions(installed);
+                }
+
+                // Collect extension categories
+                for (let i = 0; i < repos.length; i++) {
+                    if (repos[i].display_name) {
+                        values.push({
+                            title: repos[i].display_name,
+                            value: i
+                        });
+                    }
+                }
+
+                _set_status("Extension Repository loaded", false);
+
+                if (npm_installed[MANAGER_NAME]) {
+                    // Make sure post install actions have been performed
+                    _post_install(MANAGER_NAME);
+                }
+
+                _query_updates();
+            } else {
+                _set_status("Extension Repository not found", true);
+            }
+
+            // User callback
+            if (repository_cb) {
+                repository_cb(values);
+            }
+        });
     });
 }
 
-function _add_to_repository(file) {
+function _add_to_repository(file, npm_install_active, docker_install_active) {
     if (file.includes('.json')) {
         const new_repo = _read_JSON_file_sync(file);
 
         if (new_repo) {
             for (let i = 0; i < new_repo.length; i++) {
-                const category = new_repo[i].display_name;
-                let j = 0;
+                let filtered = {
+                    display_name: new_repo[i].display_name,
+                    extensions: []
+                };
+                let j;
 
-                for (; j < repos.length; j++) {
-                    if (repos[j].display_name == category) {
-                        repos[j].extensions = repos[j].extensions.concat(new_repo[i].extensions);
+                // Is the install type available and active?
+                for (j = 0; j < new_repo[i].extensions.length; j++) {
+                    if ((new_repo[i].extensions[j].repository && npm_install_active) ||
+                            (new_repo[i].extensions[j].image && docker_install_active)) {
+                        filtered.extensions.push(new_repo[i].extensions[j]);
+                    }
+                }
+                
+                // Does category already exist?
+                for (j = 0; j < repos.length; j++) {
+                    if (repos[j].display_name == filtered.display_name) {
                         break;
                     }
                 }
 
-                if (j === repos.length) {
-                    repos.push(new_repo[i]);
+                if (filtered.extensions.length) {
+                    if (j === repos.length) {
+                        // New category
+                        repos.push(filtered);
+                    } else {
+                        // Add to existing category
+                        repos[j].extensions = repos[j].extensions.concat(filtered.extensions);
+                    }
                 }
             }
         }
     }
+}
+
+function _get_docker_installed_extensions(installed) {
+    let installed_extensions = {};
+
+    if (installed) {
+        for (const name in installed) {
+            // Only images that are included in the repository
+            if (_get_index_pair(name)) {
+                if (name == MANAGER_NAME) {
+                    // Looks like we're running in a container
+                    containerized = true;
+                } else {
+                    installed_extensions[name] = installed[name];
+                }
+            }
+        }
+        console.log(installed_extensions);
+    }
+    
+    return installed_extensions;
 }
 
 function _compare(a, b) {
@@ -452,35 +535,91 @@ function _compare(a, b) {
     return 0;
 }
 
-function _get_name_from_url(url) {
-    let substrings = url && url.split(':');
+function _get_name(extension) {
+    let name;
 
-    if (substrings && substrings[0] == 'https') {
-        substrings = substrings[1].split('.')
-        if (substrings[2].indexOf('git') === 0) {
-            substrings = substrings[1].split('/')
-            return substrings[2];
+    if (extension.repository) {
+        // npm.get_name(extension.repository)
+        let substrings = extension.repository.url.split(':');
+
+        if (substrings && substrings[0] == 'https') {
+            substrings = substrings[1].split('.');
+
+            if (substrings[2].indexOf('git') === 0) {
+                substrings = substrings[1].split('/');
+                name = substrings[2];
+            }
+        }
+    } else if (extension.image) {
+        name = docker.get_name(extension.image);
+    }
+
+    return name;
+}
+
+function _get_index_pair(name) {
+    let index_pair = index_cache[name];
+
+    if (!index_pair) {
+        for (let i = 0; i < repos.length; i++) {
+            const extensions = repos[i].extensions;
+
+            for (let j = 0; j < extensions.length; j++) {
+                const entry_name = _get_name(extensions[j]);
+
+                index_cache[entry_name] = [i, j];
+
+                if (entry_name == name) {
+                    index_pair = index_cache[entry_name];
+                    break;
+                }
+            }
         }
     }
 
-    return null;
+    return index_pair;
 }
 
-function _install(git, cb) {
-    const name = _get_name_from_url(git);
-
+function _install(name, options, cb) {
     if (name) {
+        const index_pair = _get_index_pair(name);
+        const extension = repos[index_pair[0]].extensions[index_pair[1]];
+
         _set_status("Installing: " + name + "...", false);
 
-        let exec = require('child_process').exec;
-        exec('npm install -g ' + git, (err, stdout, stderr) => {
-            if (err) {
-                _set_status("Installation failed: " + name, true);
-                console.error(stderr);
-            } else {
-                _post_install(name, undefined, cb);
-            }
-        });
+        if ((npm_preferred && extension.repository && extension.image) ||   // Both available, npm preferred
+                (extension.repository && !extension.image)) {               // Only npm available
+            // npm.install()
+            const exec = require('child_process').exec;
+
+            exec('npm install -g ' + extension.repository.url, (err, stdout, stderr) => {
+                if (err) {
+                    _set_status("Installation failed: " + name, true);
+                    console.error(stderr);
+
+                    cb && cb(name);
+                } else {
+                    _post_install(name, undefined, cb);
+                }
+            });
+        } else if (extension.image) {                                       // Docker available
+            const bind_props = {
+                root:       extension_root,
+                binds_path: binds_dir + name,
+                name:       (containerized ? MANAGER_NAME : undefined)
+            };
+            
+            docker.install(extension.image, bind_props, options, (err, tag) => {
+                if (err) {
+                    _set_status("Installation failed: " + name, true);
+                    console.error(err);
+                } else {
+                    docker_installed[name] = tag;
+                }
+
+                cb && cb(name);
+            });
+        }
     }
 }
 
@@ -493,26 +632,31 @@ function _register_updated_version(name) {
 }
 
 function _register_version(name, update) {
-    _query_installs(() => {
-        const version = installed[name];
+    const version = npm_installed[name] || docker_installed[name];
+
+    if (version) {
         _set_status((update ? "Updated: " : "Installed: ") + name + " (" + version + ")", false);
 
         if (name == REPOS_NAME) {
             _load_repository();
         } else {
             if (update) {
-                if (!self_update_pending && runner.get_status(name) != 'stopped') {
+                const state = ApiExtensionInstaller.prototype.get_status.call(this, name).state;
+
+                if ((!self_update_pending || docker_installed[name]) && state != 'stopped') {
                     _start(name);
                 }
             } else {
                 _start(name, false);
             }
-
-            _query_updates(null, name);
         }
 
-        _remove_action(name);
-    }, name);   // Query installed extension to obtain version number
+        _query_updates(null, name);
+    }
+
+    // Update administration
+    _remove_action(name);
+    session_error = undefined;
 }
 
 function _update(name, cb) {
@@ -521,53 +665,67 @@ function _update(name, cb) {
             _stop(name, false, _exit_for_update);
         } else {
             _stop(name, false, () => {
-                const cwd = extension_root + module_dir + name + '/';
-                const backup_file = extension_root + backup_dir + name + '.tar';
-                const options = { file: backup_file, cwd: cwd };
+                _set_status("Updating: " + name + "...", false);
 
-                _backup(name, options, (clean) => {
-                    _set_status("Updating: " + name + "...", false);
+                if (npm_installed[name]) {
+                    const cwd = extension_root + module_dir + name + '/';
+                    const backup_file = extension_root + backup_dir + name + '.tar';
+                    const options = { file: backup_file, cwd: cwd };
 
-                    let exec = require('child_process').exec;
-                    exec('npm update -g ' + name, (err, stdout, stderr) => {
-                        if (err) {
-                            _set_status("Update failed: " + name, true);
-                            console.error(stderr);
-                        } else {
-                            _post_install(name, (clean ? undefined : options), cb);
-                        }
+                    _backup(name, options, (clean) => {
+                        const exec = require('child_process').exec;
+                        exec('npm update -g ' + name, (err, stdout, stderr) => {
+                            if (err) {
+                                _set_status("Update failed: " + name, true);
+                                console.error(stderr);
+
+                                cb && cb(name);
+                            } else {
+                                _post_install(name, (clean ? undefined : options), cb);
+                            }
+                        });
                     });
-                });
+                } else if (docker_installed[name]) {
+                    docker.update(name, (err) => {
+                        if (err) {
+                            console.error(err);
+                        }
+
+                        cb && cb(name);
+                    });
+                }
             });
         }
     }
 }
 
 function _post_install(name, options, cb) {
-    const npmignore = extension_root + module_dir + name + '/' + '.npmignore';
+    _query_installs(() => {
+        const npmignore = extension_root + module_dir + name + '/' + '.npmignore';
 
-    fs.readFile(npmignore, 'utf8', (err, data) => {
-        if (err) {
-            _download_gitignore(name, (data) => {
-                fs.writeFile(npmignore, data, (err) => {
-                    if (err) {
-                        console.error(err);
+        fs.readFile(npmignore, 'utf8', (err, data) => {
+            if (err) {
+                _download_gitignore(name, (data) => {
+                    fs.writeFile(npmignore, data, (err) => {
+                        if (err) {
+                            console.error(err);
+                        }
+                    });
+                });
+            }
+
+            if (options) {
+                const tar = require('tar');
+                tar.extract(options, [], () => {
+                    if (cb) {
+                        cb(name);
                     }
                 });
-            });
-        }
-
-        if (options) {
-            const tar = require('tar');
-            tar.extract(options, [], () => {
-                if (cb) {
-                    cb(name);
-                }
-            });
-        } else if (cb) {
-            cb(name);
-        }
-    });
+            } else if (cb) {
+                cb(name);
+            }
+        });
+    }, name);   // Query installed extension to obtain version number
 }
 
 function _backup(name, options, cb) {
@@ -582,61 +740,45 @@ function _backup(name, options, cb) {
 }
 
 function _download_gitignore(name, cb) {
+    const index_pair = _get_index_pair(name);
     let git;
 
     // Get git url from repository
-    if (index_cache[name]) {
-        const index_pair = index_cache[name].split(':');
-
+    if (index_pair) {
         git = repos[index_pair[0]].extensions[index_pair[1]].repository.url;
-    } else {
-        for (let i = 0; i < repos.length && !git; i++) {
-            const extensions = repos[i].extensions;
 
-            for (let j = 0; j < extensions.length; j++) {
-                const entry_name = _get_name_from_url(extensions[j].repository.url);
+        if (git && git.includes('github')) {
+            const https = require('https');
+            const parts = git.split('#');
+            let branch = 'master';
 
-                index_cache[entry_name] = '' + i + ':' + j;
+            if (parts.length > 1) {
+                branch = parts[1];
+            } else if (name == MANAGER_NAME) {
+                // Get committisch from package.json
+                const package_json = _read_JSON_file_sync(extension_root + module_dir + name + '/package.json');
 
-                if (entry_name == name) {
-                    git = extensions[j].repository.url;
-                    break;
+                if (package_json && package_json._requested && package_json._requested.gitCommittish) {
+                    branch = package_json._requested.gitCommittish;
                 }
             }
-        }
-    }
 
-    if (git && git.includes('github')) {
-        const https = require('https');
-        const parts = git.split('#');
-        let branch = 'master';
+            let url = parts[0].replace('.git', '/' + branch + '/.gitignore');
+            url = url.replace('github', 'raw.githubusercontent');
+            console.log('url:', url);
 
-        if (parts.length > 1) {
-            branch = parts[1];
-        } else if (name == MANAGER_NAME) {
-            // Get committisch from package.json
-            const package_json = _read_JSON_file_sync(extension_root + module_dir + name + '/package.json');
-
-            if (package_json && package_json._requested && package_json._requested.gitCommittish) {
-                branch = package_json._requested.gitCommittish;
-            }
-        }
-
-        let url = parts[0].replace('.git', '/' + branch + '/.gitignore');
-        url = url.replace('github', 'raw.githubusercontent');
-        console.log('url:', url);
-
-        https.get(url, (response) => {
-            response.on('data', (data) => {
-                if (response.statusCode == 200) {
-                    cb && cb(data);
-                } else {
-                    console.error(data.toString());
-                }
+            https.get(url, (response) => {
+                response.on('data', (data) => {
+                    if (response.statusCode == 200) {
+                        cb && cb(data);
+                    } else {
+                        console.error(data.toString());
+                    }
+                });
+            }).on('error', (err) => {
+                console.error(err);
             });
-        }).on('error', (err) => {
-            console.error(err);
-        });
+        }
     }
 }
 
@@ -667,27 +809,39 @@ function _uninstall(name, cb) {
         _stop(name, true, () => {
             _set_status("Uninstalling: " + name + "...", false);
 
-            let exec = require('child_process').exec;
-            exec('npm uninstall -g ' + name, (err, stdout, stderr) => {
-                // Internal callback
-                if (cb) {
-                    cb(name);
-                }
-                // User callback
-                if (installs_cb) {
-                    installs_cb(installed);
-                }
-            });
+            if (npm_installed[name]) {
+                // npm.uninstall
+                const exec = require('child_process').exec;
+                exec('npm uninstall -g ' + name, (err, stdout, stderr) => {
+                    cb && cb(name);
+
+                    console.log(npm_installed);
+                });
+            } else if (docker_installed[name]) {
+                docker.uninstall(name, (err, installed) => {
+                    if (err) {
+                        _set_status("Uninstall failed: " + name, true);
+                        console.error(err);
+                    } else {
+                        docker_installed = _get_docker_installed_extensions(installed);
+                    }
+
+                    cb && cb(name);
+                });
+            }
         });
     }
 }
 
 function _unregister_version(name) {
-    delete installed[name];
-    delete updates_list[name];
+    if (npm_installed[name]) {
+        delete npm_installed[name];
+        delete updates_list[name];
+    }
 
     _set_status("Uninstalled: " + name, false);
     _remove_action(name);
+    session_error = undefined;
 }
 
 function _get_log_descriptor(name) {
@@ -704,7 +858,6 @@ function _get_log_descriptor(name) {
 }
 
 function _start(name, log) {
-    const cwd = extension_root + module_dir + name;
     let inherit_mode = 'ignore';
 
     if (log === undefined) {
@@ -717,27 +870,34 @@ function _start(name, log) {
         inherit_mode = _get_log_descriptor(name);
     }
 
-    runner.start(name, cwd, '.', inherit_mode, (code, signal, user) => {
-        if (user) {
-            _set_status("Stopped: " + name, false);
-        } else if (code !== null) {
-            const WINDOWS_USER_BREAK = 3221225786;
+    if (npm_installed[name]) {
+        // npm.start()
+        const cwd = extension_root + module_dir + name;
 
-            _set_status("Terminated: " + name + " (" + code +")", code && code != WINDOWS_USER_BREAK);
-        } else if (signal) {
-            _set_status("Terminated: " + name + " (" + signal +")", false);
-        }
-
-        // Close log file
-        if (logs_list[name]) {
-            fs.closeSync(logs_list[name]);
+        runner.start(name, cwd, '.', inherit_mode, (code, signal, user) => {
             if (user) {
-                delete logs_list[name];
-            } else {
-                logs_list[name] = null;
+                _set_status("Stopped: " + name, false);
+            } else if (code !== null) {
+                const WINDOWS_USER_BREAK = 3221225786;
+
+                _set_status("Terminated: " + name + " (" + code +")", code && code != WINDOWS_USER_BREAK);
+            } else if (signal) {
+                _set_status("Terminated: " + name + " (" + signal +")", false);
             }
-        }
-    });
+
+            // Close log file
+            if (logs_list[name]) {
+                fs.closeSync(logs_list[name]);
+                if (user) {
+                    delete logs_list[name];
+                } else {
+                    logs_list[name] = null;
+                }
+            }
+        });
+    } else if (docker_installed[name]) {
+        docker.start(name);
+    }
 
     if (log) {
         _set_status("Started (with logging): " + name, false);
@@ -757,16 +917,33 @@ function _restart(name, log) {
 }
 
 function _stop(name, user, cb) {
-    if (runner && runner.get_status(name) == 'running' && name != MANAGER_NAME) {
-        _set_status("Terminating: " + name + "...", false);
+    _set_status("Terminating: " + name + "...", false);
 
-        if (user) {
-            runner.stop(name, cb);
-        } else {
-            runner.terminate(name, cb);
+    if (npm_installed[name]) {
+        // npm.stop()
+        if (runner && runner.get_status(name) == 'running' && name != MANAGER_NAME) {
+            if (user) {
+                runner.stop(name, cb);
+            } else {
+                runner.terminate(name, cb);
+            }
+        } else if (cb) {
+            cb();
         }
-    } else if (cb) {
-        cb();
+    } else if (docker_installed[name]) {
+        if (user) {
+            docker.stop(name, () => {
+                _set_status("Stopped: " + name, false);
+
+                cb && cb();
+            });
+        } else {
+            docker.terminate(name, () => {
+                _set_status("Terminated: " + name, false);
+
+                cb && cb();
+            });
+        }
     }
 }
 
@@ -831,14 +1008,17 @@ function _remove_action(name) {
 }
 
 function _perform_action() {
-    const length = Object.keys(action_queue).length;
-
-    if (length) {
+    if (Object.keys(action_queue).length) {
         const name = Object.keys(action_queue)[0];
+
+        if (!session_error) {
+            // New session
+            session_error = false;
+        }
 
         switch (action_queue[name].action) {
             case ACTION_INSTALL:
-                _install(action_queue[name].url, _register_installed_version);
+                _install(name, action_queue[name].options, _register_installed_version);
                 break;
             case ACTION_UPDATE:
                 if (name == MANAGER_NAME) {
@@ -850,12 +1030,16 @@ function _perform_action() {
             case ACTION_UNINSTALL:
                 _uninstall(name, _unregister_version);
                 break;
+            default:
+                // Not a session
+                session_error = undefined;
+                break;
         }
     }
 }
 
 function _queue_updates(updates) {
-    if (Object.keys(updates).length) {
+    if (updates && Object.keys(updates).length) {
         for (const name in updates) {
             if (name == MANAGER_NAME) {
                 self_update_pending = true;     // Prevent extension restarts
@@ -886,6 +1070,12 @@ function _query_installs(cb, name) {
 
     let exec = require('child_process').exec;
     exec('npm' + args, (err, stdout, stderr) => {
+        if (name) {
+            delete npm_installed[name];
+        } else {
+            npm_installed = {};
+        }
+
         if (err) {
             _set_status("Extension query failed", true);
             console.error(stderr);
@@ -893,26 +1083,36 @@ function _query_installs(cb, name) {
             const lines = stdout.split('\n');
             extension_root = lines[0] + '/';
 
-            if (!name) {
-                installed = {};
-            }
-
             for (let i = 1; i < lines.length; i++) {
                 let name_version = lines[i].split(' ')[1];
                 if (name_version) {
                     name_version = name_version.split('@');
-                    installed[name_version[0]] = name_version[1];
+                    npm_installed[name_version[0]] = name_version[1];
                 }
             }
-
-            if (cb) {
-                cb();
-            }
         }
+
+        cb && cb();
     });
 }
 
 function _query_updates(cb, name) {
+    let results = {};
+
+    if (Object.keys(docker_installed).length) {
+        docker.query_updates((updates) => {
+            for (const name in updates) {
+                // Only images that are included in the repository
+                if (name != MANAGER_NAME && _get_index_pair(name)) {
+                    results[name] = updates[name];
+                    updates_list[name] = updates[name];
+                }
+            }
+        }, name);
+    }
+
+    // npm.query_updates()
+    const exec = require('child_process').exec;
     let args = ' outdated -g';
 
     if (name) {
@@ -920,7 +1120,6 @@ function _query_updates(cb, name) {
     }
     args += ' --depth=0';
 
-    let exec = require('child_process').exec;
     exec('npm' + args, (err, stdout, stderr) => {
         /* In npm 4.x the 'outdated' command has an exit code of 1 in case of outdated packages
          * still the output is in stdout (stderr is empty), hence the check for stderr instead of err.
@@ -933,8 +1132,6 @@ function _query_updates(cb, name) {
             console.error(stderr);
         } else {
             const lines = stdout.split('\n');
-            let results = {};
-            let changes = {};
 
             for (let i = 1; i < lines.length && lines[i]; i++) {
                 const fields = lines[i].split(/[ ]+/);    // Split by space(s)
@@ -942,22 +1139,12 @@ function _query_updates(cb, name) {
                 const update_wanted = fields[2];
 
                 results[update_name] = update_wanted;
+                updates_list[update_name] = update_wanted;
+            }
+        }
 
-                if (updates_list[update_name] != update_wanted) {
-                    updates_list[update_name] = update_wanted;
-                    changes[update_name] = update_wanted;
-                }
-            }
-
-            // User callback
-            if (updates_cb && Object.keys(changes).length) {
-                // Supply change list
-                updates_cb(changes);
-            }
-            // Internal callback
-            if (cb) {
-                cb(results);
-            }
+        if (cb) {
+            cb(results);
         }
     });
 }
@@ -971,8 +1158,12 @@ function _set_status(message, is_error) {
         console.log(date.toISOString(), '- Inf:', message);
     }
 
-    if (status_cb) {
+    if (!session_error && status_cb) {
         status_cb(message, is_error);
+    }
+
+    if (session_error === false && is_error) {
+        session_error = true;
     }
 }
 
@@ -980,8 +1171,7 @@ function _read_JSON_file_sync(file) {
     let parsed = undefined;
 
     try {
-        let data = fs.readFileSync(file, 'utf8');
-        parsed = JSON.parse(data);
+        parsed = JSON.parse(fs.readFileSync(file, 'utf8'));
     } catch (err) {
         if (err.code !== 'ENOENT') {
             throw err;
