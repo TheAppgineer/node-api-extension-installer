@@ -177,29 +177,46 @@ function ApiExtensionInstaller(callbacks, logging, use_runner, features_file) {
                         }
                     });
 
-                    if (!npm_installed[REPOS_NAME]) {
-                        // Install extension repository
-                        _queue_action(REPOS_NAME, { action: ACTION_INSTALL, url: REPOS_GIT });
-                    } else if ( npm_installed[REPOS_NAME] < MIN_REPOS_VERSION) {
-                        _queue_action(REPOS_NAME, { action: ACTION_UPDATE });
-                    } else {
-                        _load_repository();
-                    }
-
-                    if (use_runner) {
-                        runner = new ApiExtensionRunner(MANAGER_NAME, (running) => {
-                            // Start previously running extensions
-                            for (let i = 0; i < running.length; i++) {
-                                if (npm_installed[running[i]]) {
-                                    _start(running[i], logs_array.includes(running[i]));
-                                }
-                            }
-                        });
-
-                        _set_status("Roon Extension Manager started!", false);
-                    }
-
                     console.log(npm_installed);
+
+                    docker = new ApiExtensionInstallerDocker((err, installed) => {
+                        if (err) {
+                            console.warn(err);
+                            
+                            npm_preferred = true;
+                        } else {
+                            console.log('Docker for Linux found: Version', docker.get_status().version);
+                            
+                            npm_preferred = (!features || features.docker_install != 'prio');
+
+                            if (!features || features.docker_install != 'off') {
+                                docker_installed = _get_docker_installed_extensions(installed);
+                                console.log(docker_installed);
+                            }
+                        }
+
+                        if (!npm_installed[REPOS_NAME]) {
+                            // Install extension repository
+                            _queue_action(REPOS_NAME, { action: ACTION_INSTALL, url: REPOS_GIT });
+                        } else if ( npm_installed[REPOS_NAME] < MIN_REPOS_VERSION) {
+                            _queue_action(REPOS_NAME, { action: ACTION_UPDATE });
+                        } else {
+                            _load_repository();
+                        }
+
+                        if (use_runner) {
+                            runner = new ApiExtensionRunner(MANAGER_NAME, (running) => {
+                                // Start previously running extensions
+                                for (let i = 0; i < running.length; i++) {
+                                    if (npm_installed[running[i]]) {
+                                        _start(running[i], logs_array.includes(running[i]));
+                                    }
+                                }
+                            });
+
+                            _set_status("Roon Extension Manager started!", false);
+                        }
+                    });
                 }
             });
         });
@@ -405,70 +422,53 @@ function _load_repository() {
 
     repos.push(repos_system);
 
-    docker = new ApiExtensionInstallerDocker((err, installed) => {
-        let npm_install_active    = (!features || features.npm_install    != 'off');
-        let docker_install_active = (!features || features.docker_install != 'off');
+    _add_to_repository(main_repo);
 
-        if (err) {
-            console.warn(err);
-            
-            npm_preferred = true;
-            docker_install_active = false;
-        } else {
-            console.log('Docker for Linux found: Version', docker.get_status().version);
-            
-            npm_preferred = (!features || features.docker_install != 'prio');
+    fs.readdir(local_repos, (err, files) => {
+        if (!err) {
+            for(let i = 0; i < files.length; i++) {
+                _add_to_repository(local_repos + files[i]);
+            };
         }
 
-        _add_to_repository(main_repo, npm_install_active, docker_install_active);
-
-        fs.readdir(local_repos, (err, files) => {
-            if (!err) {
-                for(let i = 0; i < files.length; i++) {
-                    _add_to_repository(local_repos + files[i], npm_install_active, docker_install_active);
-                };
+        if (repos.length) {
+            // Collect extension categories
+            for (let i = 0; i < repos.length; i++) {
+                if (repos[i].display_name) {
+                    values.push({
+                        title: repos[i].display_name,
+                        value: i
+                    });
+                }
             }
 
-            if (repos.length) {
-                if (docker_install_active) {
-                    docker_installed = _get_docker_installed_extensions(installed);
-                }
+            _set_status("Extension Repository loaded", false);
 
-                // Collect extension categories
-                for (let i = 0; i < repos.length; i++) {
-                    if (repos[i].display_name) {
-                        values.push({
-                            title: repos[i].display_name,
-                            value: i
-                        });
-                    }
-                }
-
-                _set_status("Extension Repository loaded", false);
-
-                if (npm_installed[MANAGER_NAME]) {
-                    // Make sure post install actions have been performed
-                    _post_install(MANAGER_NAME);
-                }
-
-                _query_updates();
-            } else {
-                _set_status("Extension Repository not found", true);
+            if (npm_installed[MANAGER_NAME]) {
+                // Make sure post install actions have been performed
+                _post_install(MANAGER_NAME);
             }
 
-            // User callback
-            if (repository_cb) {
-                repository_cb(values);
-            }
-        });
+            _query_updates();
+        } else {
+            _set_status("Extension Repository not found", true);
+        }
+
+        // User callback
+        if (repository_cb) {
+            repository_cb(values);
+        }
     });
 }
 
-function _add_to_repository(file, npm_install_active, docker_install_active) {
+function _add_to_repository(file) {
     if (file.includes('.json')) {
         const new_repo = _read_JSON_file_sync(file);
 
         if (new_repo) {
+            const npm_install_active    = (!features || features.npm_install != 'off');
+            const docker_install_active = (Object.keys(docker_installed).length > 0);
+            
             for (let i = 0; i < new_repo.length; i++) {
                 let filtered = {
                     display_name: new_repo[i].display_name,
@@ -520,7 +520,6 @@ function _get_docker_installed_extensions(installed) {
                 }
             }
         }
-        console.log(installed_extensions);
     }
     
     return installed_extensions;
@@ -715,23 +714,14 @@ function _post_install(name, options, cb) {
         fs.readFile(npmignore, 'utf8', (err, data) => {
             if (err) {
                 _download_gitignore(name, (data) => {
-                    fs.writeFile(npmignore, data, (err) => {
-                        if (err) {
-                            console.error(err);
-                        }
-                    });
-                });
-            }
-
-            if (options) {
-                const tar = require('tar');
-                tar.extract(options, [], () => {
-                    if (cb) {
-                        cb(name);
+                    if (data) {
+                        fs.writeFileSync(npmignore, data);
                     }
+
+                    _restore(name, options, cb);
                 });
-            } else if (cb) {
-                cb(name);
+            } else {
+                _restore(name, options, cb);
             }
         });
     }, name);   // Query installed extension to obtain version number
@@ -746,6 +736,19 @@ function _backup(name, options, cb) {
             _create_archive(data, options, cb);
         }
     });
+}
+
+function _restore(name, options, cb) {
+    if (options) {
+        const tar = require('tar');
+        tar.extract(options, [], () => {
+            if (cb) {
+                cb(name);
+            }
+        });
+    } else if (cb) {
+        cb(name);
+    }
 }
 
 function _download_gitignore(name, cb) {
@@ -764,7 +767,7 @@ function _download_gitignore(name, cb) {
             if (parts.length > 1) {
                 branch = parts[1];
             } else if (name == MANAGER_NAME) {
-                // Get committisch from package.json
+                // Get committish from package.json
                 const package_json = _read_JSON_file_sync(extension_root + module_dir + name + '/package.json');
 
                 if (package_json && package_json._requested && package_json._requested.gitCommittish) {
@@ -782,6 +785,8 @@ function _download_gitignore(name, cb) {
                         cb && cb(data);
                     } else {
                         console.error(data.toString());
+
+                        cb && cb();
                     }
                 });
             }).on('error', (err) => {
