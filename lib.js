@@ -190,8 +190,7 @@ function ApiExtensionInstaller(callbacks, logging, use_runner, features_file) {
                             npm_preferred = (!features || features.docker_install != 'prio');
 
                             if (!features || features.docker_install != 'off') {
-                                docker_installed = _get_docker_installed_extensions(installed);
-                                console.log(docker_installed);
+                                docker_installed = installed;
                             }
                         }
 
@@ -441,6 +440,9 @@ function _load_repository() {
                     });
                 }
             }
+
+            docker_installed = _get_docker_installed_extensions(docker_installed);
+            console.log(docker_installed);
 
             _set_status("Extension Repository loaded", false);
 
