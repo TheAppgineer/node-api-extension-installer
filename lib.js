@@ -760,41 +760,43 @@ function _download_gitignore(name, cb) {
     // Get git url from repository
     if (index_pair) {
         git = repos[index_pair[0]].extensions[index_pair[1]].repository.url;
+    } else if (name == REPOS_NAME) {
+        git = repos_system.extensions[REPOS_INDEX].repository.url;
+    }
 
-        if (git && git.includes('github')) {
-            const https = require('https');
-            const parts = git.split('#');
-            let branch = 'master';
+    if (git && git.includes('github')) {
+        const https = require('https');
+        const parts = git.split('#');
+        let branch = 'master';
 
-            if (parts.length > 1) {
-                branch = parts[1];
-            } else if (name == MANAGER_NAME) {
-                // Get committish from package.json
-                const package_json = _read_JSON_file_sync(extension_root + module_dir + name + '/package.json');
+        if (parts.length > 1) {
+            branch = parts[1];
+        } else if (name == MANAGER_NAME) {
+            // Get committish from package.json
+            const package_json = _read_JSON_file_sync(extension_root + module_dir + name + '/package.json');
 
-                if (package_json && package_json._requested && package_json._requested.gitCommittish) {
-                    branch = package_json._requested.gitCommittish;
-                }
+            if (package_json && package_json._requested && package_json._requested.gitCommittish) {
+                branch = package_json._requested.gitCommittish;
             }
-
-            let url = parts[0].replace('.git', '/' + branch + '/.gitignore');
-            url = url.replace('github', 'raw.githubusercontent');
-            console.log('url:', url);
-
-            https.get(url, (response) => {
-                response.on('data', (data) => {
-                    if (response.statusCode == 200) {
-                        cb && cb(data);
-                    } else {
-                        console.error(data.toString());
-
-                        cb && cb();
-                    }
-                });
-            }).on('error', (err) => {
-                console.error(err);
-            });
         }
+
+        let url = parts[0].replace('.git', '/' + branch + '/.gitignore');
+        url = url.replace('github', 'raw.githubusercontent');
+        console.log('url:', url);
+
+        https.get(url, (response) => {
+            response.on('data', (data) => {
+                if (response.statusCode == 200) {
+                    cb && cb(data);
+                } else {
+                    console.error(data.toString());
+
+                    cb && cb();
+                }
+            });
+        }).on('error', (err) => {
+            console.error(err);
+        });
     }
 }
 
