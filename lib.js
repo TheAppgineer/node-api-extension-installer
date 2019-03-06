@@ -469,7 +469,7 @@ function _add_to_repository(file) {
 
         if (new_repo) {
             const npm_install_active    = (!features || features.npm_install != 'off');
-            const docker_install_active = (Object.keys(docker_installed).length > 0);
+            const docker_install_active = (docker.get_status().version ? true : false);
             
             for (let i = 0; i < new_repo.length; i++) {
                 let filtered = {
