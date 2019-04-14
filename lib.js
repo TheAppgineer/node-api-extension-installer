@@ -24,7 +24,7 @@ const REPOS_NAME = 'roon-extension-repository';
 const REPOS_GIT = "https://github.com/TheAppgineer/roon-extension-repository.git";
 const REPOS_INDEX = 2;
 
-const MIN_REPOS_VERSION = "0.2.0"
+const MIN_REPOS_VERSION = "0.3.0"
 
 const repos_system = {
     display_name: SYSTEM_NAME,
@@ -131,7 +131,7 @@ function ApiExtensionInstaller(callbacks, logging, use_runner, features_file) {
             if (features_file) {
                 features = _read_JSON_file_sync(features_file);
             }
-            
+
             if (!features) {
                 features = _read_JSON_file_sync(extension_root + 'features.json');
             }
@@ -182,11 +182,11 @@ function ApiExtensionInstaller(callbacks, logging, use_runner, features_file) {
                     docker = new ApiExtensionInstallerDocker((err, installed) => {
                         if (err) {
                             console.warn(err);
-                            
+
                             npm_preferred = true;
                         } else {
                             console.log('Docker for Linux found: Version', docker.get_status().version);
-                            
+
                             npm_preferred = (!features || features.docker_install != 'prio');
 
                             if (!features || features.docker_install != 'off') {
@@ -470,7 +470,7 @@ function _add_to_repository(file) {
         if (new_repo) {
             const npm_install_active    = (!features || features.npm_install != 'off');
             const docker_install_active = (docker.get_status().version ? true : false);
-            
+
             for (let i = 0; i < new_repo.length; i++) {
                 let filtered = {
                     display_name: new_repo[i].display_name,
@@ -485,7 +485,7 @@ function _add_to_repository(file) {
                         filtered.extensions.push(new_repo[i].extensions[j]);
                     }
                 }
-                
+
                 // Does category already exist?
                 for (j = 0; j < repos.length; j++) {
                     if (repos[j].display_name == filtered.display_name) {
@@ -523,7 +523,7 @@ function _get_docker_installed_extensions(installed) {
             }
         }
     }
-    
+
     return installed_extensions;
 }
 
@@ -618,7 +618,7 @@ function _install(name, options, cb) {
                 binds_path: binds_dir + name,
                 name:       (containerized ? MANAGER_NAME : undefined)
             };
-            
+
             docker.install(extension.image, bind_props, options, (err, tag) => {
                 if (err) {
                     _set_status("Installation failed: " + name, true);
