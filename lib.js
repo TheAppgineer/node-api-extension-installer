@@ -191,6 +191,15 @@ function ApiExtensionInstaller(callbacks, logging, use_runner, features_file) {
 
                             if (!features || features.docker_install != 'off') {
                                 docker_installed = installed;
+
+                                for (let i = 0; i < logs_array.length; i++) {
+                                    const name = logs_array[i];
+
+                                    if (docker_installed[name] && docker.get_status(name).state == 'running') {
+                                        console.log("Capturing log stream of " + name);
+                                        docker.log(name, _get_log_descriptor(name));
+                                    }
+                                }
                             }
                         }
 
@@ -268,7 +277,11 @@ ApiExtensionInstaller.prototype.restart_manager = function() {
  */
 ApiExtensionInstaller.prototype.get_status = function(name) {
     if (docker_installed[name]) {
-        return docker.get_status(name);
+        let status = docker.get_status(name);
+
+        status.logging = (logs_list[name] !== undefined);
+
+        return status;
     } else {
         // npm.get_status(name)
         const version = npm_installed[name];
@@ -328,13 +341,13 @@ ApiExtensionInstaller.prototype.get_actions = function(name) {
 
             if (state == 'running') {
                 actions.push(_create_action_pair(ACTION_RESTART));
-                if (logging_active && npm_installed[name]) {
+                if (logging_active) {
                     actions.push(_create_action_pair(ACTION_RESTART_AND_LOG));
                 }
                 actions.push(_create_action_pair(ACTION_STOP));
             } else {
                 actions.push(_create_action_pair(ACTION_START));
-                if (logging_active && npm_installed[name]) {
+                if (logging_active) {
                     actions.push(_create_action_pair(ACTION_START_AND_LOG));
                 }
             }
@@ -385,6 +398,16 @@ ApiExtensionInstaller.prototype.perform_action = function(action, name, options)
             _stop(name, true);
             break;
     }
+}
+
+ApiExtensionInstaller.prototype.get_logs_archive = function(cb) {
+    const tar = require('tar');
+    const backup_file = extension_root + backup_dir + 'extension-logs.tar.gz';
+    const options = { file: backup_file, cwd: extension_root, gzip: true };
+
+    tar.create(options, [log_dir], () => {
+        cb && cb(backup_file);
+    });
 }
 
 function _create_action_pair(action) {
@@ -863,11 +886,12 @@ function _unregister_version(name) {
 }
 
 function _get_log_descriptor(name) {
-    const log_file = extension_root + log_dir + name + '.log';
     let descriptor = logs_list[name];
 
     // Get file descriptor if it hasn't been defined
     if (descriptor == undefined) {
+        const log_file = extension_root + log_dir + name + '.log';
+
         descriptor = fs.openSync(log_file, 'a');
         logs_list[name] = descriptor;
     }
@@ -876,7 +900,7 @@ function _get_log_descriptor(name) {
 }
 
 function _start(name, log) {
-    let inherit_mode = 'ignore';
+    let fd;
 
     if (log === undefined) {
         log = (logging_active && logs_list[name] !== undefined);
@@ -885,14 +909,14 @@ function _start(name, log) {
     }
 
     if (log) {
-        inherit_mode = _get_log_descriptor(name);
+        fd = _get_log_descriptor(name);
     }
 
     if (npm_installed[name]) {
         // npm.start()
         const cwd = extension_root + module_dir + name;
 
-        runner.start(name, cwd, '.', inherit_mode, (code, signal, user) => {
+        runner.start(name, cwd, '.', (fd ? fd : 'ignore'), (code, signal, user) => {
             if (user) {
                 _set_status("Stopped: " + name, false);
             } else if (code !== null) {
@@ -914,7 +938,7 @@ function _start(name, log) {
             }
         });
     } else if (docker_installed[name]) {
-        docker.start(name);
+        docker.start(name, fd);
     }
 
     if (log) {
