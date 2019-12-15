@@ -19,8 +19,9 @@ const SYSTEM_NAME = "System";
 
 const UPDATER_NAME = "roon-extension-manager-updater";
 const MANAGER_NAME = "roon-extension-manager";
-const REPOS_NAME = 'roon-extension-repository';
+const MANAGER_INDEX = 1;
 
+const REPOS_NAME = 'roon-extension-repository';
 const REPOS_GIT = "https://github.com/TheAppgineer/roon-extension-repository.git";
 const REPOS_INDEX = 2;
 
@@ -132,12 +133,12 @@ function ApiExtensionInstaller(callbacks, logging, use_runner, features_file) {
                 features = _read_JSON_file_sync(features_file);
             }
 
-            if (!features) {
+            if (!features && extension_root) {
                 features = _read_JSON_file_sync(extension_root + 'features.json');
             }
 
             // Create log directory
-            mkdirp(extension_root + log_dir, (err, made) => {
+            extension_root && mkdirp(extension_root + log_dir, (err, made) => {
                 if (err) {
                     console.error(err);
                 } else {
@@ -203,27 +204,30 @@ function ApiExtensionInstaller(callbacks, logging, use_runner, features_file) {
                             }
                         }
 
-                        if (!npm_installed[REPOS_NAME]) {
-                            // Install extension repository
-                            _queue_action(REPOS_NAME, { action: ACTION_INSTALL, url: REPOS_GIT });
-                        } else if ( npm_installed[REPOS_NAME] < MIN_REPOS_VERSION) {
-                            _queue_action(REPOS_NAME, { action: ACTION_UPDATE });
-                        } else {
-                            _load_repository();
-                        }
+                        // Make sure post install actions have been performed
+                        _post_install(MANAGER_NAME, undefined, () => {
+                            if (!npm_installed[REPOS_NAME]) {
+                                // Install extension repository
+                                _queue_action(REPOS_NAME, { action: ACTION_INSTALL, url: REPOS_GIT });
+                            } else if ( npm_installed[REPOS_NAME] < MIN_REPOS_VERSION) {
+                                _queue_action(REPOS_NAME, { action: ACTION_UPDATE });
+                            } else {
+                                _load_repository();
+                            }
 
-                        if (use_runner) {
-                            runner = new ApiExtensionRunner(MANAGER_NAME, (running) => {
-                                // Start previously running extensions
-                                for (let i = 0; i < running.length; i++) {
-                                    if (npm_installed[running[i]]) {
-                                        _start(running[i], logs_array.includes(running[i]));
+                            if (use_runner) {
+                                runner = new ApiExtensionRunner(MANAGER_NAME, (running) => {
+                                    // Start previously running extensions
+                                    for (let i = 0; i < running.length; i++) {
+                                        if (npm_installed[running[i]]) {
+                                            _start(running[i], logs_array.includes(running[i]));
+                                        }
                                     }
-                                }
-                            });
+                                });
 
-                            _set_status("Roon Extension Manager started!", false);
-                        }
+                                _set_status("Roon Extension Manager started!", false);
+                            }
+                        });
                     });
                 }
             });
@@ -468,11 +472,6 @@ function _load_repository() {
             console.log(docker_installed);
 
             _set_status("Extension Repository loaded", false);
-
-            if (npm_installed[MANAGER_NAME]) {
-                // Make sure post install actions have been performed
-                _post_install(MANAGER_NAME);
-            }
 
             _query_updates();
         } else {
@@ -733,23 +732,33 @@ function _update(name, cb) {
 }
 
 function _post_install(name, options, cb) {
-    _query_installs(() => {
-        const npmignore = extension_root + module_dir + name + '/' + '.npmignore';
-
-        fs.readFile(npmignore, 'utf8', (err, data) => {
-            if (err) {
-                _download_gitignore(name, (data) => {
-                    if (data) {
-                        fs.writeFileSync(npmignore, data);
-                    }
-
-                    _restore(name, options, cb);
-                });
-            } else {
-                _restore(name, options, cb);
-            }
-        });
+    _query_installs((peer_deps) => {
+        if (peer_deps) {
+            _install_peer_dependency(name, peer_deps, peer_deps.length - 1, () => {
+                _read_npmignore(name, options, cb);
+            });
+        } else {
+            _read_npmignore(name, options, cb);
+        }
     }, name);   // Query installed extension to obtain version number
+}
+
+function _read_npmignore(name, options, cb) {
+    const npmignore = extension_root + module_dir + name + '/.npmignore';
+
+    fs.readFile(npmignore, 'utf8', (err, data) => {
+        if (err) {
+            _download_gitignore(name, (data) => {
+                if (data) {
+                    fs.writeFileSync(npmignore, data);
+                }
+
+                _restore(name, options, cb);
+            });
+        } else {
+            _restore(name, options, cb);
+        }
+    });
 }
 
 function _backup(name, options, cb) {
@@ -783,6 +792,8 @@ function _download_gitignore(name, cb) {
     // Get git url from repository
     if (index_pair) {
         git = repos[index_pair[0]].extensions[index_pair[1]].repository.url;
+    } else if (name == MANAGER_NAME) {
+        git = repos_system.extensions[MANAGER_INDEX].repository.url;
     } else if (name == REPOS_NAME) {
         git = repos_system.extensions[REPOS_INDEX].repository.url;
     }
@@ -1027,7 +1038,11 @@ function _terminate(exit_code, log) {
             }
         });
     } else {
-        process.exit(1);
+        if (exit_code) {
+            process.exit(exit_code);
+        } else {
+            process.exit(1);
+        }
     }
 }
 
@@ -1103,38 +1118,99 @@ function _queue_updates(updates) {
 }
 
 function _query_installs(cb, name) {
-    let args = ' list -g';
+    let args = ' list';
+    let options = {};
 
     if (name) {
-        args += ' ' + name;
+        options.cwd = extension_root + module_dir + name;
+    } else {
+        args += ' -g';
     }
     args += ' --depth=0';
 
-    let exec = require('child_process').exec;
-    exec('npm' + args, (err, stdout, stderr) => {
-        if (name) {
-            delete npm_installed[name];
-        } else {
-            npm_installed = {};
-        }
+    const exec = require('child_process').exec;
+    exec('npm' + args, options, (err, stdout, stderr) => {
+        let peer_deps;
 
         if (err) {
-            _set_status("Extension query failed", true);
-            console.error(stderr);
+            const lines = stderr.split('\n');
+
+            for (let i = 0; i < lines.length; i++) {
+                const err_line = lines[i].split(': ');
+                
+                if (err_line[0] == 'npm ERR! peer dep missing') {
+                    if (!peer_deps) peer_deps = [];
+                    
+                    peer_deps.push(err_line[1].split(', ')[0]);
+                }
+            }
+            
+            if (peer_deps) {
+                // Update extension_root if this global list output
+                if (name === undefined) {
+                    extension_root = stdout.split('\n')[0] + '/';
+                }
+            } else {
+                _set_status("Extension query failed", true);
+                console.error(stderr);
+            }
         } else {
             const lines = stdout.split('\n');
-            extension_root = lines[0] + '/';
 
-            for (let i = 1; i < lines.length; i++) {
-                let name_version = lines[i].split(' ')[1];
+            if (name) {
+                // Process list output (npm list)
+                delete npm_installed[name];
+                
+                let name_version = lines[0].split(' ')[0];              
                 if (name_version) {
                     name_version = name_version.split('@');
                     npm_installed[name_version[0]] = name_version[1];
                 }
+            } else {
+                // Process global list output (npm list -g)
+                npm_installed = {};
+                extension_root = lines[0] + '/';
+
+                for (let i = 1; i < lines.length; i++) {
+                    let name_version = lines[i].split(' ')[1];
+                    if (name_version) {
+                        name_version = name_version.split('@');
+                        npm_installed[name_version[0]] = name_version[1];
+                    }
+                }
             }
         }
 
-        cb && cb();
+        cb && cb(peer_deps);
+    });
+}
+
+function _install_peer_dependency(name, peer_deps, count, cb) {
+    const exec = require('child_process').exec;
+    const cwd = extension_root + module_dir + name;
+    const package_string = peer_deps[count];
+
+    _set_status("Installing peer dependency: " + package_string + "...", false);
+
+    exec('npm install ' + package_string, { cwd: cwd }, (err, stdout, stderr) => {
+        if (err) {
+            console.error(stderr);
+            _set_status("Installation failed: " + package_string, true);
+
+            if (name != MANAGER_NAME) {
+                // Installation of peer dependency failed: uninstall full package
+                _remove_action(name);
+                _queue_action(name, { action: ACTION_UNINSTALL });
+            }
+        } else if (count) {
+            _install_peer_dependency(name, peer_deps, count - 1, cb);
+        } else {
+            if (name == MANAGER_NAME) {
+                _terminate(perform_restart, logging_active ? logs_list[MANAGER_NAME] : undefined);
+            } else {
+                cb && cb(name);
+            }
+        }
     });
 }
 
