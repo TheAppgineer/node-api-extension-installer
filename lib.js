@@ -1126,11 +1126,11 @@ function _query_installs(cb, name) {
     } else {
         args += ' -g';
     }
-    args += ' --depth=0';
 
     const exec = require('child_process').exec;
-    exec('npm' + args, options, (err, stdout, stderr) => {
+    exec('npm' + args + ' --depth=0', options, (err, stdout, stderr) => {
         let peer_deps;
+        let other_error = false;
 
         if (err) {
             const lines = stderr.split('\n');
@@ -1139,21 +1139,20 @@ function _query_installs(cb, name) {
                 const err_line = lines[i].split(': ');
                 
                 if (err_line[0] == 'npm ERR! peer dep missing') {
-                    if (!peer_deps) peer_deps = [];
+                    if (!peer_deps) peer_deps = {};
                     
-                    peer_deps.push(err_line[1].split(', ')[0]);
+                    peer_deps[err_line[1].split(', ')[0]] = undefined;
+                } else if (lines[i]) {
+                    console.error(lines[i]);
+                    other_error = true;
                 }
             }
-            
-            if (peer_deps) {
-                // Update extension_root if this global list output
-                if (name === undefined) {
-                    extension_root = stdout.split('\n')[0] + '/';
-                }
-            } else {
-                _set_status("Extension query failed", true);
-                console.error(stderr);
-            }
+        }
+        
+        if (other_error) {
+            _set_status("Extension query failed", true);
+
+            cb && cb();
         } else {
             const lines = stdout.split('\n');
 
@@ -1179,9 +1178,9 @@ function _query_installs(cb, name) {
                     }
                 }
             }
-        }
 
-        cb && cb(peer_deps);
+            cb && cb(peer_deps ? Object.keys(peer_deps) : undefined);
+        }
     });
 }
 
