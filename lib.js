@@ -292,7 +292,7 @@ ApiExtensionInstaller.prototype.get_status = function(name) {
 
         let state = (version ? 'installed' : 'not_installed');
 
-        if (state == 'installed' && name != REPOS_NAME) {
+        if (state == 'installed' && name != REPOS_NAME && runner) {
             state = runner.get_status(name);
         }
 
@@ -336,9 +336,12 @@ ApiExtensionInstaller.prototype.get_actions = function(name) {
         }
 
         if (name == MANAGER_NAME) {
-            actions.push(_create_action_pair(ACTION_RESTART));
-            if (logging_active && (!features || features.log_mode != 'child_nodes')) {
-                actions.push(_create_action_pair(ACTION_RESTART_AND_LOG));
+            if (state == 'running') {
+                actions.push(_create_action_pair(ACTION_RESTART));
+
+                if (logging_active && (!features || features.log_mode != 'child_nodes')) {
+                    actions.push(_create_action_pair(ACTION_RESTART_AND_LOG));
+                }
             }
         } else if (repos[_get_index_pair(name)[0]].display_name != SYSTEM_NAME) {
             actions.push(_create_action_pair(ACTION_UNINSTALL));
@@ -442,7 +445,6 @@ function _check_prerequisites() {
 function _load_repository() {
     const main_repo = extension_root + module_dir + REPOS_NAME + '/repository.json';
     const local_repos = extension_root + repos_dir;
-    let values = [];
 
     repos.length = 0;       // Cleanup first
 
@@ -458,6 +460,8 @@ function _load_repository() {
         }
 
         if (repos.length) {
+            let values = [];
+
             // Collect extension categories
             for (let i = 0; i < repos.length; i++) {
                 if (repos[i].display_name) {
@@ -471,16 +475,15 @@ function _load_repository() {
             docker_installed = _get_docker_installed_extensions(docker_installed);
             console.log(docker_installed);
 
-            _set_status("Extension Repository loaded", false);
+            _query_updates(() => {
+                _set_status("Extension Repository loaded", false);
 
-            _query_updates();
+                repository_cb && repository_cb(values);
+            });
         } else {
             _set_status("Extension Repository not found", true);
-        }
 
-        // User callback
-        if (repository_cb) {
-            repository_cb(values);
+            repository_cb && repository_cb();
         }
     });
 }
@@ -735,7 +738,13 @@ function _post_install(name, options, cb) {
     _query_installs((peer_deps) => {
         if (peer_deps) {
             _install_peer_dependency(name, peer_deps, peer_deps.length - 1, () => {
-                _read_npmignore(name, options, cb);
+                _read_npmignore(name, options, () => {
+                    if (runner && name == MANAGER_NAME) {
+                        _terminate(perform_restart, logging_active ? logs_list[MANAGER_NAME] : undefined);
+                    } else {
+                        cb && cb(name);
+                    }
+                });
             });
         } else {
             _read_npmignore(name, options, cb);
@@ -1204,11 +1213,7 @@ function _install_peer_dependency(name, peer_deps, count, cb) {
         } else if (count) {
             _install_peer_dependency(name, peer_deps, count - 1, cb);
         } else {
-            if (name == MANAGER_NAME) {
-                _terminate(perform_restart, logging_active ? logs_list[MANAGER_NAME] : undefined);
-            } else {
-                cb && cb(name);
-            }
+            cb && cb(name);
         }
     });
 }
