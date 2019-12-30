@@ -182,7 +182,8 @@ function ApiExtensionInstaller(callbacks, logging, use_runner, features_file) {
 
                     docker = new ApiExtensionInstallerDocker((err, installed) => {
                         if (err) {
-                            console.warn(err);
+                            // Docker errors are not critical for operation
+                            console.log('Warning: ' + err);
 
                             npm_preferred = true;
                         } else {
@@ -629,10 +630,9 @@ function _install(name, options, cb) {
 
             exec('npm install -g ' + extension.repository.url, (err, stdout, stderr) => {
                 if (err) {
-                    _set_status("Installation failed: " + name, true);
                     console.error(stderr);
 
-                    cb && cb(name);
+                    cb && cb(name, err);
                 } else {
                     _post_install(name, undefined, cb);
                 }
@@ -658,19 +658,21 @@ function _install(name, options, cb) {
     }
 }
 
-function _register_installed_version(name) {
-    _register_version(name, false);
+function _register_installed_version(name, err) {
+    _register_version(name, false, err);
 }
 
-function _register_updated_version(name) {
-    _register_version(name, true);
+function _register_updated_version(name, err) {
+    _register_version(name, true, err);
 }
 
-function _register_version(name, update) {
+function _register_version(name, update, err) {
     const version = npm_installed[name] || docker_installed[name];
 
-    if (version) {
-        _set_status((update ? "Updated: " : "Installed: ") + name + " (" + version + ")", false);
+    if (err) {
+        _set_status((update ? 'Update' : 'Installation') + ' failed: ' + name, true);
+    } else if (version) {
+        _set_status((update ? 'Updated: ' : 'Installed: ') + name + ' (' + version + ')', false);
 
         if (name == REPOS_NAME) {
             _load_repository();
@@ -711,10 +713,9 @@ function _update(name, cb) {
                         const exec = require('child_process').exec;
                         exec('npm update -g ' + name, (err, stdout, stderr) => {
                             if (err) {
-                                _set_status("Update failed: " + name, true);
                                 console.error(stderr);
 
-                                cb && cb(name);
+                                cb && cb(name, err);
                             } else {
                                 _post_install(name, (clean ? undefined : options), cb);
                             }
@@ -942,9 +943,9 @@ function _start(name, log) {
             } else if (code !== null) {
                 const WINDOWS_USER_BREAK = 3221225786;
 
-                _set_status("Terminated: " + name + " (" + code +")", code && code != WINDOWS_USER_BREAK);
+                _set_status("Process terminated: " + name + " (" + code +")", code && code != WINDOWS_USER_BREAK);
             } else if (signal) {
-                _set_status("Terminated: " + name + " (" + signal +")", false);
+                _set_status("Process terminated: " + name + " (" + signal +")", false);
             }
 
             // Close log file
@@ -979,7 +980,7 @@ function _restart(name, log) {
 }
 
 function _stop(name, user, cb) {
-    _set_status("Terminating: " + name + "...", false);
+    _set_status("Terminating process: " + name + "...", false);
 
     if (npm_installed[name]) {
         // npm.stop()
@@ -1001,7 +1002,7 @@ function _stop(name, user, cb) {
             });
         } else {
             docker.terminate(name, () => {
-                _set_status("Terminated: " + name, false);
+                _set_status("Process terminated: " + name, false);
 
                 cb && cb();
             });
