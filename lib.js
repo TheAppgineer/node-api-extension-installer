@@ -110,6 +110,7 @@ var session_error;
 
 var repository_cb;
 var status_cb;
+var on_activity_changed;
 
 function ApiExtensionInstaller(callbacks, logging, use_runner, features_file) {
     process.on('SIGTERM', _terminate);
@@ -226,6 +227,7 @@ function ApiExtensionInstaller(callbacks, logging, use_runner, features_file) {
                                     }
                                 });
 
+                                callbacks.started && callbacks.started();
                                 _set_status("Roon Extension Manager started!", false);
                             }
                         });
@@ -385,7 +387,12 @@ ApiExtensionInstaller.prototype.perform_action = function(action, name, options)
             _queue_action(name, { action: ACTION_INSTALL, options: options });
             break;
         case ACTION_UPDATE:
-            _query_updates(_queue_updates, name);
+            if (updates_list[name]) {
+                let update = {};
+
+                update[name] = updates_list[name];
+                _queue_updates(update);
+            }
             break;
         case ACTION_UNINSTALL:
             _queue_action(name, { action: ACTION_UNINSTALL });
@@ -406,6 +413,14 @@ ApiExtensionInstaller.prototype.perform_action = function(action, name, options)
             _stop(name, true);
             break;
     }
+}
+
+ApiExtensionInstaller.prototype.set_on_activity_changed = function(cb) {
+    on_activity_changed = cb;
+}
+
+ApiExtensionInstaller.prototype.is_idle = function(name) {
+    return (name ? !action_queue[name] : !Object.keys(action_queue).length);
 }
 
 ApiExtensionInstaller.prototype.get_logs_archive = function(cb) {
@@ -1061,10 +1076,13 @@ function _exit_for_update() {
 }
 
 function _queue_action(name, action_props) {
-    action_queue[name] = action_props;
+    if (!action_queue[name]) {      // No action replace
+        action_queue[name] = action_props;
 
-    if (Object.keys(action_queue).length == 1) {
-        _perform_action();
+        if (Object.keys(action_queue).length == 1) {
+            on_activity_changed && on_activity_changed();
+            _perform_action();
+        }
     }
 }
 
@@ -1102,6 +1120,8 @@ function _perform_action() {
                 session_error = undefined;
                 break;
         }
+    } else {
+        on_activity_changed && on_activity_changed();
     }
 }
 
