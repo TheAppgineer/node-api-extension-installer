@@ -491,9 +491,9 @@ function _load_repository() {
             docker_installed = _get_docker_installed_extensions(docker_installed);
             console.log(docker_installed);
 
-            _query_updates(() => {
-                _set_status("Extension Repository loaded", false);
+            _set_status("Extension Repository loaded", false);
 
+            _query_updates(() => {
                 repository_cb && repository_cb(values);
             });
         } else {
@@ -690,7 +690,9 @@ function _register_version(name, update, err) {
         _set_status((update ? 'Updated: ' : 'Installed: ') + name + ' (' + version + ')', false);
 
         if (name == REPOS_NAME) {
-            _load_repository();
+            if (!self_update_pending) {
+                _load_repository();
+            }
         } else {
             if (update) {
                 const state = ApiExtensionInstaller.prototype.get_status.call(this, name).state;
@@ -701,9 +703,9 @@ function _register_version(name, update, err) {
             } else {
                 _start(name, false);
             }
-        }
 
-        _query_updates(null, name);
+            _query_updates(null, name);
+        }
     }
 
     // Update administration
