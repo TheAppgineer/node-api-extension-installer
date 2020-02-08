@@ -1,4 +1,4 @@
-// Copyright 2017, 2018, 2019 The Appgineer
+// Copyright 2017, 2018, 2019, 2020 The Appgineer
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -27,7 +27,7 @@ const REPOS_INDEX = 2;
 
 const MIN_REPOS_VERSION = "0.3.0"
 
-const repos_system = {
+const repo_system = {
     display_name: SYSTEM_NAME,
     extensions: [{
         repository: {
@@ -95,7 +95,7 @@ var runner = undefined;
 var docker = undefined;
 var extension_root;
 var features;
-var repos = [];
+var repos = [repo_system];
 var index_cache = {};
 var npm_installed = {};
 var npm_preferred = true;
@@ -105,7 +105,7 @@ var updates_list = {};
 var action_queue = {};
 var logging_active = false;
 var logs_list = {};
-var self_update_pending = false;
+var own_action;
 var session_error;
 
 var repository_cb;
@@ -263,7 +263,7 @@ ApiExtensionInstaller.prototype.get_extensions_by_category = function(category_i
 }
 
 ApiExtensionInstaller.prototype.update = function(name) {
-    ApiExtensionInstaller.prototype.perform_action.call(this, ACTION_UPDATE, name);
+    _perform_action(ACTION_UPDATE, name);
 }
 
 ApiExtensionInstaller.prototype.update_all = function() {
@@ -376,12 +376,63 @@ ApiExtensionInstaller.prototype.get_features = function() {
 
 ApiExtensionInstaller.prototype.set_log_state = function(logging) {
     if ((!logging_active && logging) || (logging_active && !logging)) {
-        // State changed
+        // Log state changed
         _restart(MANAGER_NAME);
     }
 }
 
-ApiExtensionInstaller.prototype.perform_action = function(action, name, options) {
+ApiExtensionInstaller.prototype.perform_actions = function(actions) {
+    for (const name in actions) {
+        if (name == MANAGER_NAME) {
+            own_action = actions[name].action;
+        } else {
+            _perform_action(actions[name].action, name, actions[name].options);
+        }
+        
+        // Consume action
+        delete actions[name];
+    }
+
+    // Own action last
+    switch (own_action) {
+        case ACTION_UPDATE:
+            _perform_action(own_action, MANAGER_NAME);
+            break;
+        case ACTION_RESTART:
+        case ACTION_RESTART_AND_LOG:
+            if (Object.keys(action_queue).length == 0) {
+                _restart(MANAGER_NAME, own_action == ACTION_RESTART_AND_LOG);
+            }
+            break;
+    }
+}
+
+ApiExtensionInstaller.prototype.set_on_activity_changed = function(cb) {
+    on_activity_changed = cb;
+}
+
+ApiExtensionInstaller.prototype.is_idle = function(name) {
+    return (name ? !action_queue[name] : !Object.keys(action_queue).length);
+}
+
+ApiExtensionInstaller.prototype.get_logs_archive = function(cb) {
+    const tar = require('tar');
+    const backup_file = extension_root + backup_dir + 'extension-logs.tar.gz';
+    const options = { file: backup_file, cwd: extension_root, gzip: true };
+
+    tar.create(options, [log_dir], () => {
+        cb && cb(backup_file);
+    });
+}
+
+function _create_action_pair(action) {
+    return {
+        title: action_strings[action],
+        value: action
+    };
+}
+
+function _perform_action(action, name, options) {
     switch (action) {
         case ACTION_INSTALL:
             _queue_action(name, { action: ACTION_INSTALL, options: options });
@@ -415,31 +466,6 @@ ApiExtensionInstaller.prototype.perform_action = function(action, name, options)
     }
 }
 
-ApiExtensionInstaller.prototype.set_on_activity_changed = function(cb) {
-    on_activity_changed = cb;
-}
-
-ApiExtensionInstaller.prototype.is_idle = function(name) {
-    return (name ? !action_queue[name] : !Object.keys(action_queue).length);
-}
-
-ApiExtensionInstaller.prototype.get_logs_archive = function(cb) {
-    const tar = require('tar');
-    const backup_file = extension_root + backup_dir + 'extension-logs.tar.gz';
-    const options = { file: backup_file, cwd: extension_root, gzip: true };
-
-    tar.create(options, [log_dir], () => {
-        cb && cb(backup_file);
-    });
-}
-
-function _create_action_pair(action) {
-    return {
-        title: action_strings[action],
-        value: action
-    };
-}
-
 function _check_prerequisites() {
     let execSync = require('child_process').execSync;
     let git_version = execSync('git --version').toString();
@@ -462,9 +488,7 @@ function _load_repository() {
     const main_repo = extension_root + module_dir + REPOS_NAME + '/repository.json';
     const local_repos = extension_root + repos_dir;
 
-    repos.length = 0;       // Cleanup first
-
-    repos.push(repos_system);
+    repos.length = 1;       // Cleanup all but the System repo
 
     _add_to_repository(main_repo);
 
@@ -625,16 +649,8 @@ function _get_index_pair(name) {
 
 function _install(name, options, cb) {
     if (name) {
-        let extension;
-
-        if (name == REPOS_NAME) {
-            // Repository not installed yet, access system repo directly
-            extension = repos_system.extensions[REPOS_INDEX];
-        } else {
-            const index_pair = _get_index_pair(name);
-
-            extension = repos[index_pair[0]].extensions[index_pair[1]];
-        }
+        const index_pair = _get_index_pair(name);
+        const extension = repos[index_pair[0]].extensions[index_pair[1]];
 
         _set_status("Installing: " + name + "...", false);
 
@@ -690,14 +706,14 @@ function _register_version(name, update, err) {
         _set_status((update ? 'Updated: ' : 'Installed: ') + name + ' (' + version + ')', false);
 
         if (name == REPOS_NAME) {
-            if (!self_update_pending) {
+            if (!own_action) {
                 _load_repository();
             }
         } else {
             if (update) {
                 const state = ApiExtensionInstaller.prototype.get_status.call(this, name).state;
 
-                if ((!self_update_pending || docker_installed[name]) && state != 'stopped') {
+                if ((!own_action || docker_installed[name]) && state != 'stopped') {
                     _start(name);
                 }
             } else {
@@ -814,16 +830,7 @@ function _restore(name, options, cb) {
 
 function _download_gitignore(name, cb) {
     const index_pair = _get_index_pair(name);
-    let git;
-
-    // Get git url from repository
-    if (index_pair) {
-        git = repos[index_pair[0]].extensions[index_pair[1]].repository.url;
-    } else if (name == MANAGER_NAME) {
-        git = repos_system.extensions[MANAGER_INDEX].repository.url;
-    } else if (name == REPOS_NAME) {
-        git = repos_system.extensions[REPOS_INDEX].repository.url;
-    }
+    const git = repos[index_pair[0]].extensions[index_pair[1]].repository.url;
 
     if (git && git.includes('github')) {
         const https = require('https');
@@ -850,7 +857,11 @@ function _download_gitignore(name, cb) {
                 if (response.statusCode == 200) {
                     cb && cb(data);
                 } else {
-                    console.error(data.toString());
+                    if (response.statusCode == 404) {
+                        console.log('gitignore file not found');
+                    } else {
+                        console.error(data.toString());
+                    }
 
                     cb && cb();
                 }
@@ -989,7 +1000,13 @@ function _start(name, log) {
 function _restart(name, log) {
     _stop(name, false, () => {
         if (runner && name == MANAGER_NAME) {
-            _terminate(perform_restart, log);
+            if (Object.keys(action_queue).length) {
+                if (!own_action) {
+                    own_action = (log ? ACTION_RESTART_AND_LOG : ACTION_RESTART);
+                }
+            } else {
+                _terminate(perform_restart, log);
+            }
         } else {
             _start(name, log);
         }
@@ -997,11 +1014,11 @@ function _restart(name, log) {
 }
 
 function _stop(name, user, cb) {
-    _set_status("Terminating process: " + name + "...", false);
-
     if (npm_installed[name]) {
         // npm.stop()
         if (runner && runner.get_status(name) == 'running' && name != MANAGER_NAME) {
+            _set_status("Terminating process: " + name + "...", false);
+
             if (user) {
                 runner.stop(name, cb);
             } else {
@@ -1011,6 +1028,8 @@ function _stop(name, user, cb) {
             cb();
         }
     } else if (docker_installed[name]) {
+        _set_status("Terminating process: " + name + "...", false);
+
         if (user) {
             docker.stop(name, () => {
                 _set_status("Stopped: " + name, false);
@@ -1083,7 +1102,7 @@ function _queue_action(name, action_props) {
 
         if (Object.keys(action_queue).length == 1) {
             on_activity_changed && on_activity_changed();
-            _perform_action();
+            _perform_queued_action();
         }
     }
 }
@@ -1091,10 +1110,10 @@ function _queue_action(name, action_props) {
 function _remove_action(name) {
     delete action_queue[name];
 
-    _perform_action();      // Anything pending?
+    _perform_queued_action();      // Anything pending?
 }
 
-function _perform_action() {
+function _perform_queued_action() {
     if (Object.keys(action_queue).length) {
         const name = Object.keys(action_queue)[0];
 
@@ -1122,6 +1141,8 @@ function _perform_action() {
                 session_error = undefined;
                 break;
         }
+    } else if (own_action == ACTION_RESTART || own_action == ACTION_RESTART_AND_LOG) {
+        _restart(MANAGER_NAME, own_action == ACTION_RESTART_AND_LOG);
     } else {
         on_activity_changed && on_activity_changed();
     }
@@ -1131,13 +1152,13 @@ function _queue_updates(updates) {
     if (updates && Object.keys(updates).length) {
         for (const name in updates) {
             if (name == MANAGER_NAME) {
-                self_update_pending = true;     // Prevent extension restarts
+                own_action = ACTION_UPDATE;     // Prevent extension restarts
             } else {
                 _queue_action(name, { action: ACTION_UPDATE });
             }
         }
 
-        if (self_update_pending) {
+        if (own_action == ACTION_UPDATE) {
             // Perform manager actions last
             if (runner && updates_list[UPDATER_NAME]) {
                 _queue_action(UPDATER_NAME, { action: ACTION_UPDATE });
