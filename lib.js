@@ -1332,7 +1332,9 @@ function _read_JSON_file_sync(file) {
     try {
         parsed = JSON.parse(fs.readFileSync(file, 'utf8'));
     } catch (err) {
-        if (err.code !== 'ENOENT') {
+        if (err.toString().includes('SyntaxError')) {
+            console.error(err);
+        } else if (err.code !== 'ENOENT') {
             throw err;
         }
     }
