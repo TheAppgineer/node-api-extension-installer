@@ -1,4 +1,4 @@
-// Copyright 2017, 2018, 2019 The Appgineer
+// Copyright 2017, 2018, 2019, 2020 The Appgineer
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -846,15 +846,24 @@ function _download_gitignore(name, cb) {
         console.log('url:', url);
 
         https.get(url, (response) => {
-            response.on('data', (data) => {
-                if (response.statusCode == 200) {
-                    cb && cb(data);
+            if (response.statusCode == 200) {
+                let body = "";
+
+                response.on('data', (data) => {
+                    body += data;
+                });
+                response.on('end', () => {
+                    cb && cb(body);
+                });
+            } else {
+                if (response.statusCode == 404) {
+                    console.log('.gitignore file not found');
                 } else {
                     console.error(data.toString());
-
-                    cb && cb();
                 }
-            });
+
+                cb && cb();
+            }
         }).on('error', (err) => {
             console.error(err);
         });
@@ -868,6 +877,11 @@ function _create_archive(data, options, cb) {
 
     for (let i = 0; i < lines.length; i++) {
         let line = lines[i].trim();
+
+        if (line[line.length - 1] == '/') {
+            // Remove trailing slash
+            line = line.substring(0, line.length - 1);
+        }
 
         if (line && line != 'node_modules' && line[0] != '#') {
             if (fs.existsSync(options.cwd + line)) {
