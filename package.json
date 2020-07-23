@@ -1,6 +1,6 @@
 {
     "name": "node-api-extension-installer",
-    "version": "0.11.7",
+    "version": "0.11.8",
     "description": "Node API providing a Roon extension installer via wrapped npm commands",
     "main": "lib.js",
     "author": "The Appgineer",
@@ -9,7 +9,7 @@
         "mkdirp": "^0.5.0",
         "tar": "^4.4.10",
         "node-api-extension-runner": "github:TheAppgineer/node-api-extension-runner#v0.3.0",
-        "node-api-extension-installer-docker": "github:TheAppgineer/node-api-extension-installer-docker#v0.3.0"
+        "node-api-extension-installer-docker": "github:TheAppgineer/node-api-extension-installer-docker#v0.3.1"
     },
     "repository": {
         "type": "git",
