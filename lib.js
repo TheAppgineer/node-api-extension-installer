@@ -113,9 +113,9 @@ var status_cb;
 var on_activity_changed;
 
 function ApiExtensionInstaller(callbacks, logging, use_runner, features_file) {
-    process.on('SIGTERM', _terminate);
-    process.on('SIGINT', _terminate);
-    process.on('SIGBREAK', _terminate);
+    process.on('SIGTERM', _handle_signal);
+    process.on('SIGINT', _handle_signal);
+    process.on('SIGBREAK', _handle_signal);
 
     if (callbacks) {
         if (callbacks.repository_changed) {
@@ -1089,6 +1089,10 @@ function _terminate(exit_code, log) {
 
 function _exit_for_update() {
     _terminate(perform_update);
+}
+
+function _handle_signal(signal) {
+    _terminate();
 }
 
 function _queue_action(name, action_props) {
