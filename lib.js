@@ -1168,32 +1168,32 @@ function _queue_updates(updates) {
 }
 
 function _query_installs(cb, name) {
-    let args = ' list';
-    let options = {};
+    let command = 'npm list -g --depth=0';
 
     if (name) {
-        options.cwd = extension_root + module_dir + name;
-    } else {
-        args += ' -g';
+        command += ' ' + name;
     }
 
     const exec = require('child_process').exec;
-    exec('npm' + args + ' --depth=0', options, (err, stdout, stderr) => {
+    exec(command, (err, stdout, stderr) => {
+        const lines = stdout.split('\n');
         let peer_deps;
         let other_error = false;
 
-        if (err) {
-            const lines = stderr.split('\n');
+        extension_root = lines[0] + '/';
 
-            for (let i = 0; i < lines.length; i++) {
-                const err_line = lines[i].split(': ');
+        if (name && err) {
+            const err_lines = stderr.split('\n');
+
+            for (let i = 0; i < err_lines.length; i++) {
+                const err_line = err_lines[i].split(': ');
                 
-                if (err_line[0] == 'npm ERR! peer dep missing') {
+                if (err_line[0] == 'npm ERR! peer dep missing' || err_line[0] == 'npm ERR! missing') {
                     if (!peer_deps) peer_deps = {};
                     
                     peer_deps[err_line[1].split(', ')[0]] = undefined;
-                } else if (lines[i]) {
-                    console.error(lines[i]);
+                } else if (err_lines[i]) {
+                    console.error(err_lines[i]);
                     other_error = true;
                 }
             }
@@ -1204,28 +1204,18 @@ function _query_installs(cb, name) {
 
             cb && cb();
         } else {
-            const lines = stdout.split('\n');
-
+            // Process global list output (npm list -g)
             if (name) {
-                // Process list output (npm list)
                 delete npm_installed[name];
-                
-                let name_version = lines[0].split(' ')[0];              
+            } else {
+                npm_installed = {};
+            }
+
+            for (let i = 1; i < lines.length; i++) {
+                let name_version = lines[i].split(' ')[1];
                 if (name_version) {
                     name_version = name_version.split('@');
                     npm_installed[name_version[0]] = name_version[1];
-                }
-            } else {
-                // Process global list output (npm list -g)
-                npm_installed = {};
-                extension_root = lines[0] + '/';
-
-                for (let i = 1; i < lines.length; i++) {
-                    let name_version = lines[i].split(' ')[1];
-                    if (name_version) {
-                        name_version = name_version.split('@');
-                        npm_installed[name_version[0]] = name_version[1];
-                    }
                 }
             }
 
