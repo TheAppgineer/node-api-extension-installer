@@ -1,4 +1,4 @@
-// Copyright 2017, 2018, 2019, 2020 The Appgineer
+// Copyright 2017, 2018, 2019, 2020, 2021 The Appgineer
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -145,6 +145,8 @@ function ApiExtensionInstaller(callbacks, logging, use_runner, features_file) {
                 } else {
                     let logs_array = [];
 
+                    _set_status("Starting Roon Extension Manager...", false);
+
                     if (!features || features.log_mode != 'off') {
                         // Logging feature active
                         if (logging) {
@@ -179,8 +181,6 @@ function ApiExtensionInstaller(callbacks, logging, use_runner, features_file) {
                         }
                     });
 
-                    console.log(npm_installed);
-
                     docker = new ApiExtensionInstallerDocker((err, installed) => {
                         if (err) {
                             // Docker errors are not critical for operation
@@ -188,7 +188,7 @@ function ApiExtensionInstaller(callbacks, logging, use_runner, features_file) {
 
                             npm_preferred = true;
                         } else {
-                            console.log('Docker for Linux found: Version', docker.get_status().version);
+                            _set_status(`Docker for Linux found: Version ${docker.get_status().version}`, false);
 
                             npm_preferred = (!features || features.docker_install != 'prio');
 
@@ -228,7 +228,6 @@ function ApiExtensionInstaller(callbacks, logging, use_runner, features_file) {
                                 });
 
                                 callbacks.started && callbacks.started();
-                                _set_status("Roon Extension Manager started!", false);
                             }
                         });
                     });
@@ -488,6 +487,9 @@ function _load_repository() {
                 }
             }
 
+            npm_installed = _get_npm_installed_extensions(npm_installed);
+            console.log(npm_installed);
+
             docker_installed = _get_docker_installed_extensions(docker_installed);
             console.log(docker_installed);
 
@@ -546,6 +548,21 @@ function _add_to_repository(file) {
             }
         }
     }
+}
+
+function _get_npm_installed_extensions(installed) {
+    let installed_extensions = {};
+
+    if (installed) {
+        for (const name in installed) {
+            // Only packages that are included in the repository
+            if (_get_index_pair(name)) {
+                installed_extensions[name] = installed[name];
+            }
+        }
+    }
+
+    return installed_extensions;
 }
 
 function _get_docker_installed_extensions(installed) {
@@ -1187,10 +1204,10 @@ function _query_installs(cb, name) {
 
             for (let i = 0; i < err_lines.length; i++) {
                 const err_line = err_lines[i].split(': ');
-                
+
                 if (err_line[0] == 'npm ERR! peer dep missing' || err_line[0] == 'npm ERR! missing') {
                     if (!peer_deps) peer_deps = {};
-                    
+
                     peer_deps[err_line[1].split(', ')[0]] = undefined;
                 } else if (err_lines[i]) {
                     console.error(err_lines[i]);
@@ -1198,7 +1215,7 @@ function _query_installs(cb, name) {
                 }
             }
         }
-        
+
         if (other_error) {
             _set_status("Extension query failed", true);
 
@@ -1217,6 +1234,11 @@ function _query_installs(cb, name) {
                     name_version = name_version.split('@');
                     npm_installed[name_version[0]] = name_version[1];
                 }
+            }
+
+            if (repos.length) {
+                // Only packages that are included in the repository
+                npm_installed = _get_npm_installed_extensions(npm_installed);
             }
 
             cb && cb(peer_deps ? Object.keys(peer_deps) : undefined);
@@ -1266,14 +1288,13 @@ function _query_updates(cb, name) {
 
     // npm.query_updates()
     const exec = require('child_process').exec;
-    let args = ' outdated -g';
+    let command = 'npm outdated -g --depth=0';
 
     if (name) {
-        args += ' ' + name;
+        command += ' ' + name;
     }
-    args += ' --depth=0';
 
-    exec('npm' + args, (err, stdout, stderr) => {
+    exec(command, (err, stdout, stderr) => {
         /* In npm 4.x the 'outdated' command has an exit code of 1 in case of outdated packages
          * still the output is in stdout (stderr is empty), hence the check for stderr instead of err.
          * Although old behavior (exit code of 0) may be selectable in future npm releases:
@@ -1283,7 +1304,7 @@ function _query_updates(cb, name) {
         if (stderr) {
             _set_status("Updates query failed", true);
             console.error(stderr);
-        } else {
+        } else if (stdout) {
             const lines = stdout.split('\n');
 
             for (let i = 1; i < lines.length && lines[i]; i++) {
@@ -1291,8 +1312,25 @@ function _query_updates(cb, name) {
                 const update_name = fields[0];
                 const update_wanted = fields[2];
 
-                results[update_name] = update_wanted;
-                updates_list[update_name] = update_wanted;
+                // Only packages that are included in the repository
+                if (_get_index_pair(update_name)) {
+                    results[update_name] = update_wanted;
+                    updates_list[update_name] = update_wanted;
+                }
+            }
+        } else {
+            /* In npm 7.x (at least 7.3.0) the 'outdated' command gives no output on git dependencies,
+            * this might be a bug as documentation still says that these are always reinstalled.
+            * The workaround is to take over the installed npm based extensions as these are all git dependencies.
+            */
+            if (name) {
+                results[name] = npm_installed[name];
+                updates_list[name] = npm_installed[name];
+            } else {
+                for (const name in npm_installed) {
+                    results[name] = npm_installed[name];
+                    updates_list[name] = npm_installed[name];
+                }
             }
         }
 
